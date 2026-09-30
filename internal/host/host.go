@@ -48,6 +48,7 @@ type Host struct {
 	thinkingApplier agents.ApplyThinking // /model 调推理强度时联动各 Worker
 	writerRestore   *ctxpack.WriterRestorePack
 	userRules       *userrules.Service
+	rulesOpts       rules.LoadOptions
 	observer        *observer
 	usage           *UsageTracker
 	usageCancel     context.CancelFunc  // 停掉 autoSaveLoop 并触发最后一次 flush
@@ -109,6 +110,11 @@ func New(cfg bootstrap.Config, bundle assets.Bundle, options ...NewOption) (*Hos
 		if option != nil {
 			option(&opts)
 		}
+	}
+	// 规则来源默认绑定进程 cwd；多项目宿主用 WithUserRulesOptions 按项目目录覆盖。
+	rulesOpts := rules.DefaultOptions()
+	if opts.rulesOptions != nil {
+		rulesOpts = *opts.rulesOptions
 	}
 
 	bookLease, err := acquireBookLease(cfg.OutputDir)
@@ -204,7 +210,8 @@ func New(cfg bootstrap.Config, bundle assets.Bundle, options ...NewOption) (*Hos
 		models:          models,
 		thinkingApplier: applyThinking,
 		writerRestore:   restore,
-		userRules:       userrules.NewService(store, models.Default, rules.DefaultOptions()),
+		userRules:       userrules.NewService(store, models.Default, rulesOpts),
+		rulesOpts:       rulesOpts,
 		usage:           usage,
 		usageCancel:     usageCancel,
 		configPath:      bootstrap.EffectiveConfigPath(),
@@ -317,7 +324,7 @@ func (h *Host) PrepareUserRules(rawPrompt string) error {
 	// 超时落到既有 degraded 路径：宁可降级为 raw preferences 也不阻塞开书。
 	ctx, cancel := context.WithTimeout(h.runCtx, userRulesBuildTimeout)
 	defer cancel()
-	svc := userrules.NewService(h.store, h.models.Default, rules.DefaultOptions())
+	svc := userrules.NewService(h.store, h.models.Default, h.rulesOpts)
 	snap, err := runObservedStep(h.observer, "SYSTEM", "rules", "规则归一化",
 		func() (*rules.Snapshot, error) { return svc.Build(ctx, rawPrompt) })
 	if err != nil {
@@ -341,7 +348,7 @@ func (h *Host) ensureUserRules() {
 	// 同样必须可取消 + 有超时,否则恢复路径复现 issue #125 的静默卡死。
 	ctx, cancel := context.WithTimeout(h.runCtx, userRulesBuildTimeout)
 	defer cancel()
-	svc := userrules.NewService(h.store, h.models.Default, rules.DefaultOptions())
+	svc := userrules.NewService(h.store, h.models.Default, h.rulesOpts)
 	snap, err := svc.GetOrBuild(ctx)
 	if err != nil {
 		slog.Warn("用户规则快照读取/生成失败，运行时将退到内置默认", "module", "rules", "err", err)

@@ -96,6 +96,50 @@ func LoadConfig() (Config, error) {
 	return cfg, nil
 }
 
+// LoadConfigFor 与 LoadConfig 语义相同（全局为基底、项目级覆盖），只是把"项目级"
+// 从当前工作目录换成显式的 projectDir。合并方向与优先级完全一致。
+//
+// 供多项目宿主使用：一个进程同时管理多本书时无法依赖 cwd（进程只有一个），
+// 改为按项目目录显式解析，使每本书拿到自己的 ./.ainovel/config.json。
+func LoadConfigFor(projectDir string) (Config, error) {
+	return LoadConfigForLayers("", projectDir)
+}
+
+// LoadConfigForLayers 按 全局 → baseDir → projectDir 三层合并配置，优先级后者覆盖前者。
+//
+// 多项目宿主用它把"服务端自己的 ./.ainovel/config.json"作为所有项目共享的基底：
+// 凭证与默认模型只写一份，每本书只需按需覆盖自己关心的字段。baseDir 为空时
+// 等价于 LoadConfigFor。
+func LoadConfigForLayers(baseDir, projectDir string) (Config, error) {
+	var cfg Config
+
+	if p := DefaultConfigPath(); p != "" {
+		global, found, err := loadOptionalJSON(p)
+		switch {
+		case err != nil:
+			slog.Warn("全局配置解析失败，已忽略（可被项目级覆盖）", "module", "config", "path", p, "err", err)
+		case found:
+			cfg = global
+		}
+	}
+
+	for _, dir := range []string{baseDir, projectDir} {
+		if dir == "" {
+			continue
+		}
+		path := filepath.Join(dir, configDirName, "config.json")
+		layer, found, err := loadOptionalJSON(path)
+		if err != nil {
+			return cfg, fmt.Errorf("项目级配置 %s 解析失败（请检查 JSON 语法）: %w", path, err)
+		}
+		if found {
+			cfg = mergeConfig(cfg, layer)
+		}
+	}
+
+	return cfg, nil
+}
+
 // loadOptionalJSON 读取一个可选的配置文件：
 //   - 文件不存在 → (zero, false, nil)，由调用方决定用默认/上层值
 //   - 文件存在但解析失败 → 返回错误（不再静默吞掉——否则用户的配置"配了不生效"
