@@ -116,6 +116,17 @@ function renderList() {
   }
 }
 
+// refreshProjects 重新拉一次项目列表。被占用的项目不会推送状态变化，只能靠轮询。
+async function refreshProjects() {
+  try {
+    const list = await api('/api/projects');
+    state.projects.clear();
+    for (const p of list) state.projects.set(p.id, p);
+    renderList();
+    if (state.selected) renderStat();
+  } catch (_) { /* 断线时静默，SSE 重连后会补 */ }
+}
+
 function stateLabel(p) {
   if (p.error) return '异常';
   if (p.state === 'running') return '运行中';
@@ -194,14 +205,18 @@ function pushEvent(ev) {
     node.appendChild(el('span', 'txt'));
     node.appendChild(el('span', 'ms'));
     log.appendChild(node);
-    if (ev.id) state.events.set(ev.id, node);
-    if (state.order.length > 400) {
-      const old = state.order.shift();
-      if (old && state.events.get(old)) state.events.get(old).remove();
-      state.events.delete(old);
+    if (ev.id) {
+      state.events.set(ev.id, node);
+      // 只在新建时登记：更新路径重复 push 会让 400 条上限提前淘汰仍在更新的 id，
+      // 下次更新时 map miss → 追加新节点 → 完成事件跑到日志最末尾。
+      state.order.push(ev.id);
+      if (state.order.length > 400) {
+        const old = state.order.shift();
+        if (old && state.events.get(old)) state.events.get(old).remove();
+        state.events.delete(old);
+      }
     }
   }
-  if (ev.id) state.order.push(ev.id);
   node.className = 'ev ' + ev.category + (ev.running ? ' running' : '');
   node.children[0].textContent = `${fmtTime(ev.time)} ${ev.category}${ev.agent ? '/' + ev.agent : ''}`;
   node.children[1].textContent = ev.summary || ev.detail || '';
@@ -218,10 +233,18 @@ function fmtTime(t) {
 
 // ── 渲染：输出流 / 章节 ──
 
+// STREAM_LIMIT 兜住长时间生成：state.stream 只在收到 clear 时重置，而 clear 与
+// delta 走同一条会"丢最旧"的订阅缓冲——丢掉一个 clear 就意味着本轮输出再也
+// 清不空，且每次 pushDelta 都要重排整段文本（长轮次下是 O(n²) 的 DOM 工作）。
+const STREAM_LIMIT = 200000;
+
 function pushDelta(text) {
   const out = $('#out');
   if (out.dataset.mode !== 'stream') { out.textContent = ''; out.dataset.mode = 'stream'; }
   state.stream += text;
+  if (state.stream.length > STREAM_LIMIT) {
+    state.stream = state.stream.slice(state.stream.length - STREAM_LIMIT);
+  }
   out.textContent = state.stream;
   out.scrollTop = out.scrollHeight;
 }
@@ -243,8 +266,13 @@ function showChapter(n, content) {
 
 // ── SSE ──
 
+let globalES = null;
 function connectGlobal() {
+  // 单例：每次刷新都新建 EventSource 会永久泄漏服务端订阅者（一个 goroutine +
+  // 一个 512 槽通道），且每次 publish 的扇出成本翻倍。
+  if (globalES) globalES.close();
   const es = new EventSource('/api/events');
+  globalES = es;
   es.addEventListener('open', () => { $('#conn').textContent = '已连接'; $('#conn').className = 'tag done'; });
   es.addEventListener('error', () => { $('#conn').textContent = '重连中'; $('#conn').className = 'tag err'; });
   es.addEventListener('snapshot', (m) => {
@@ -253,7 +281,6 @@ function connectGlobal() {
     renderList();
     if (s.id === state.selected) renderStat();
   });
-  es.addEventListener('error_ev', () => {});
   es.addEventListener('error', (m) => {
     if (m.data) { try { toast(JSON.parse(m.data).data.error); } catch (_) {} }
   });
@@ -267,8 +294,9 @@ function select(id) {
   state.order = [];
   clearStream();
   renderList();
+  // renderStat 内部已经按 locked 状态决定置灰/解锁，这里不能再无条件 unlockControls()，
+  // 否则"选中一本被占用的书"会把刚禁用的按钮全部重新打开。
   renderStat();
-  unlockControls();
   if (projES) projES.close();
   projES = new EventSource(`/api/projects/${id}/events`);
   projES.addEventListener('snapshot', (m) => {
@@ -303,11 +331,13 @@ $('#np-go').onclick = async () => {
     const r = await api('/api/projects', { id: $('#np-id').value.trim(), prompt });
     $('#np-prompt').value = '';
     $('#np-id').value = '';
+    // Start 失败时服务端返回 202（项目已建、只是没开写），仍要选中它，
+    // 否则用户看到一个"建了但界面跳不过去"的项目。
     select(r.id);
     if (r.error) toast(r.error);
   } catch (e) { toast(e.message); }
 };
-$('#np-scan').onclick = async () => { await api('/api/projects'); connectGlobal(); };
+$('#np-scan').onclick = () => refreshProjects();
 $('#mt-go').onclick = async () => {
   const dir = $('#mt-dir').value.trim();
   if (!dir) { toast('填书目录绝对路径'); return; }
@@ -358,5 +388,7 @@ $('#steer').addEventListener('keydown', (e) => {
     if (list.length) select(list[0].id);
   } catch (e) { toast(e.message); }
   connectGlobal();
-  setInterval(() => { if (state.selected) renderStat(); }, 5000);
+  // 真正的轮询：locked 的项目从不被打开，publishState 不会为它触发，
+  // 光靠 SSE 永远等不到"占用解除"这个变化（页面会一直灰着并说谎）。
+  setInterval(refreshProjects, 5000);
 })();

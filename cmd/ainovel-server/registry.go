@@ -20,6 +20,7 @@ import (
 	"github.com/voocel/ainovel-cli/internal/bootstrap"
 	"github.com/voocel/ainovel-cli/internal/domain"
 	"github.com/voocel/ainovel-cli/internal/host"
+	"github.com/voocel/ainovel-cli/internal/revision"
 	"github.com/voocel/ainovel-cli/internal/rules"
 	storepkg "github.com/voocel/ainovel-cli/internal/store"
 )
@@ -193,6 +194,16 @@ func (r *Registry) Mount(id, dir string) (*Project, error) {
 	if filepath.Join(r.root, id) == abs {
 		return nil, fmt.Errorf("%s 已在 workspace 内，无需挂载", id)
 	}
+	// 挂载点不能落在 workspace 之内：否则 workspace 项目与挂载项会指向同一份
+	// output_dir，一个拿到 flock，另一个永远 ErrBookInUse，而且占用探测会把后者
+	// 显示成"被另一个服务端占用"（指向自己）。
+	if rel, relErr := filepath.Rel(r.root, abs); relErr == nil &&
+		rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return nil, fmt.Errorf("%s 在 workspace 内，无需挂载", abs)
+	}
+	if clash := r.projectByOutputDir(storeDir); clash != "" {
+		return nil, fmt.Errorf("该书已作为项目 %q 存在，不要重复挂载", clash)
+	}
 
 	r.mu.Lock()
 	if _, ok := r.mounts[id]; ok {
@@ -210,6 +221,18 @@ func (r *Registry) Mount(id, dir string) (*Project, error) {
 	}
 	slog.Info("已挂载外部书目录", "id", id, "dir", abs, "store", storeDir)
 	return r.attach(NewProject(id, abs, r.base, storeDir)), nil
+}
+
+// projectByOutputDir 找出已指向同一 store 的项目 id；没有则返回空串。
+func (r *Registry) projectByOutputDir(storeDir string) string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for id, p := range r.projects {
+		if p.OutputDir() == storeDir {
+			return id
+		}
+	}
+	return ""
 }
 
 // Unmount 取消挂载（不动磁盘数据）。workspace 内的项目不接受此操作。
@@ -353,7 +376,18 @@ func (r *Registry) create(id string, overrides map[string]any) (*Project, error)
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return nil, err
 	}
-	if err := os.MkdirAll(filepath.Join(dir, ".ainovel"), 0o755); err != nil {
+	// 先在同级临时目录里把配置写好再 rename 过去：任何一步失败都不留半成品目录。
+	// 否则一次配置解析失败就会永久占住这个 id——此后每次重试都报"已存在"，
+	// 只能手动 rm -rf 才能重试。
+	if err := os.MkdirAll(r.root, 0o755); err != nil {
+		return nil, err
+	}
+	staging, err := os.MkdirTemp(r.root, ".staging-"+id+"-")
+	if err != nil {
+		return nil, err
+	}
+	defer os.RemoveAll(staging)
+	if err := os.MkdirAll(filepath.Join(staging, ".ainovel"), 0o755); err != nil {
 		return nil, err
 	}
 
@@ -386,7 +420,10 @@ func (r *Registry) create(id string, overrides map[string]any) (*Project, error)
 		}
 		skeleton[k] = v
 	}
-	if err := writeJSONFile(filepath.Join(dir, ".ainovel", "config.json"), skeleton); err != nil {
+	if err := writeJSONFile(filepath.Join(staging, ".ainovel", "config.json"), skeleton); err != nil {
+		return nil, err
+	}
+	if err := os.Rename(staging, dir); err != nil {
 		return nil, err
 	}
 	return r.attach(NewProject(id, dir, r.base, "")), nil
@@ -442,7 +479,6 @@ type Project struct {
 	stateMu sync.Mutex
 
 	host    *host.Host
-	cfg     bootstrap.Config
 	hub     *Hub
 	global  *Hub // 全局总线，供项目列表页订阅
 	state   runState
@@ -456,6 +492,7 @@ type Project struct {
 	holderLocked bool // 缓存的是"是否被占"这个布尔量，而不只是 holder 身份
 	holderAt     time.Time
 	holderValue  holder
+	holderProbe  bool // 已有探测在途：后来的调用直接用旧值，不重复 fork lsof/ps
 }
 
 func NewProject(id, dir, base, storeDir string) *Project {
@@ -515,7 +552,6 @@ func (p *Project) openLocked() error {
 	p.hostMu.Lock()
 	p.host = h
 	p.hostMu.Unlock()
-	p.cfg = cfg
 	p.stateMu.Lock()
 	p.opened = time.Now()
 	p.stateMu.Unlock()
@@ -549,6 +585,7 @@ func (p *Project) Close() {
 	h.Close()
 	p.stateMu.Lock()
 	p.state = stateClosed
+	p.pumped = false // 重开必须重新起泵，否则新 Host 的事件通道无人消费、只进不出
 	p.stateMu.Unlock()
 	p.invalidateHolder()
 	p.publishState()
@@ -648,6 +685,29 @@ func (p *Project) Snapshot() SnapshotDTO {
 		State: string(state), Opened: opened, Error: lastErr,
 	}
 
+	h := p.current()
+	if h == nil {
+		// 未打开：只读磁盘事实，让列表页在没有任何 Host 的情况下也能出内容。
+		p.fillOffline(&dto)
+		// 区分"没人管"与"被别的进程管着"。探测在锁外做，带 TTL 缓存 + 单飞——
+		// lsof + ps 是两个子进程，不能挂在每 5 秒一次的快照路径上。
+		if locked, who := p.holderOf(dto.OutputDir); locked {
+			dto.State = string(stateLocked)
+			dto.Holder = &who
+		}
+		return dto
+	}
+
+	// 已打开：host.Snapshot() 自己会读 progress/book/runmeta（读得更全，还带 outline、
+	// 角色、resumeLabel），这里不再重复读一遍 store——对一本 200 章的完本小说，那
+	// 意味着每次快照多 200 次文件读，而结果有一半被 DTO 丢掉。
+	ui := h.Snapshot()
+	p.fillLive(&dto, ui)
+	return dto
+}
+
+// fillOffline 从 store 读磁盘事实填 dto（Host 未打开时使用）。
+func (p *Project) fillOffline(dto *SnapshotDTO) {
 	st := storepkg.NewStore(p.OutputDir())
 	if prog, err := st.Progress.Load(); err == nil && prog != nil {
 		dto.Phase = string(prog.Phase)
@@ -663,21 +723,6 @@ func (p *Project) Snapshot() SnapshotDTO {
 	if meta, err := st.RunMeta.Load(); err == nil && meta != nil {
 		dto.AdvanceMode = string(meta.AdvanceMode)
 	}
-
-	h := p.current()
-	if h == nil {
-		// 区分"没人管"与"被别的进程管着"。探测在锁外做，且带 TTL 缓存——
-		// lsof + ps 是两个子进程，不能挂在每 5 秒一次的快照路径上。
-		if locked, who := p.holderOf(dto.OutputDir); locked {
-			dto.State = string(stateLocked)
-			dto.Holder = &who
-		}
-		return dto
-	}
-
-	ui := h.Snapshot()
-	p.fillLive(&dto, ui)
-	return dto
 }
 
 // fillLive 把 host.UISnapshot 合并进 dto。
@@ -754,11 +799,20 @@ func (p *Project) holderOf(outputDir string) (bool, holder) {
 		p.holderLock.Unlock()
 		return locked, who
 	}
+	// 单飞：探测要 fork lsof + ps（最长 4s）。没有这道闸，TTL 一到、N 个并发快照
+	// 就同时探测，GET /api/projects 会串行付 N 倍的子进程代价。
+	if p.holderProbe {
+		locked, who := p.holderLocked, p.holderValue
+		p.holderLock.Unlock()
+		return locked, who
+	}
+	p.holderProbe = true
 	p.holderLock.Unlock()
 
 	locked, who := dirLocked(outputDir)
 
 	p.holderLock.Lock()
+	p.holderProbe = false
 	p.holderCached, p.holderLocked = true, locked
 	p.holderAt, p.holderValue = time.Now(), who
 	p.holderLock.Unlock()
@@ -906,13 +960,29 @@ func (p *Project) Chapter(n int) (string, error) {
 }
 
 // SyncCheck 列出被手工改动过、需要 /sync 接纳的章节。
+//
+// 刻意**不**走 withHostValue：这是一个只读端点，而 withHostValue 会跨 LLM 调用持有
+// ctrlMu（干预裁定最长可达分钟级）。它也不该顺带把项目打开——那会构造完整 Host、
+// 加载文风资产、去抢 flock 租约，而这一切对"比对章节文件的 SHA-256"毫无用处。
+// 逻辑与 host.Host.CheckChapterRevisions 同源（同一份 revision.Scan）。
 func (p *Project) SyncCheck() ([]int, error) {
-	v, err := p.withHostValue(func(h *host.Host) (any, error) { return h.CheckChapterRevisions() })
+	st := storepkg.NewStore(p.OutputDir())
+	pending, err := st.Revisions.LoadPending()
+	if err != nil {
+		return nil, fmt.Errorf("读取修订恢复记录: %w", err)
+	}
+	if pending != nil {
+		chapters := make([]int, 0, len(pending.Items))
+		for _, item := range pending.Items {
+			chapters = append(chapters, item.Chapter)
+		}
+		return chapters, nil
+	}
+	changes, err := revision.Scan(st)
 	if err != nil {
 		return nil, err
 	}
-	chapters, _ := v.([]int)
-	return chapters, nil
+	return revision.ChangedChapters(changes), nil
 }
 
 func writeJSONFile(path string, v any) error {

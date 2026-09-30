@@ -55,7 +55,7 @@ func (r *Registry) Handler(cors bool) http.Handler {
 			ContextWindow   int            `json:"context_window"`
 			Extra           map[string]any `json:"extra"`
 		}
-		if err := decodeBody(req, &body); err != nil {
+		if err := decodeBody(w, req, &body); err != nil {
 			writeErr(w, http.StatusBadRequest, err)
 			return
 		}
@@ -108,7 +108,7 @@ func (r *Registry) Handler(cors bool) http.Handler {
 			ID  string `json:"id"`
 			Dir string `json:"dir"`
 		}
-		if err := decodeBody(req, &body); err != nil {
+		if err := decodeBody(w, req, &body); err != nil {
 			writeErr(w, http.StatusBadRequest, err)
 			return
 		}
@@ -153,7 +153,7 @@ func (r *Registry) Handler(cors bool) http.Handler {
 		var body struct {
 			Prompt string `json:"prompt"`
 		}
-		if err := decodeBody(req, &body); err != nil {
+		if err := decodeBody(w, req, &body); err != nil {
 			writeErr(w, http.StatusBadRequest, err)
 			return
 		}
@@ -181,7 +181,7 @@ func (r *Registry) Handler(cors bool) http.Handler {
 			var body struct {
 				Text string `json:"text"`
 			}
-			if err := decodeBody(req, &body); err != nil {
+			if err := decodeBody(w, req, &body); err != nil {
 				writeErr(w, http.StatusBadRequest, err)
 				return
 			}
@@ -211,7 +211,7 @@ func (r *Registry) Handler(cors bool) http.Handler {
 		var body struct {
 			Mode string `json:"mode"`
 		}
-		if err := decodeBody(req, &body); err != nil {
+		if err := decodeBody(w, req, &body); err != nil {
 			writeErr(w, http.StatusBadRequest, err)
 			return
 		}
@@ -239,7 +239,7 @@ func (r *Registry) Handler(cors bool) http.Handler {
 			Model    string `json:"model"`
 			Thinking string `json:"thinking"`
 		}
-		if err := decodeBody(req, &body); err != nil {
+		if err := decodeBody(w, req, &body); err != nil {
 			writeErr(w, http.StatusBadRequest, err)
 			return
 		}
@@ -324,7 +324,7 @@ func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Last-Event-ID")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return

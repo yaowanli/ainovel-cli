@@ -19,12 +19,12 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
-	"strings"
 	"syscall"
 	"time"
 
@@ -37,7 +37,7 @@ func main() {
 		addr      = flag.String("addr", "127.0.0.1:8787", "HTTP 监听地址")
 		workspace = flag.String("workspace", "workspace", "项目根目录，每本书一个子目录")
 		baseDir   = flag.String("base", ".", "所有项目共享的配置基底目录（其 ./.ainovel/config.json）")
-		openAPI   = flag.Bool("openapi", true, "允许跨域访问 API（本地调试用）")
+		openAPI   = flag.Bool("openapi", false, "允许跨域访问 API（危险：任何网页都能驱动本机创作并消耗额度）")
 		verbose   = flag.Bool("v", false, "输出调试日志")
 	)
 	flag.Parse()
@@ -129,15 +129,16 @@ func writeErr(w http.ResponseWriter, status int, err error) {
 	writeJSON(w, status, map[string]string{"error": err.Error()})
 }
 
-// decodeBody 解析请求体；空体视为 {}，让所有 POST 端点都能无体调用。
-func decodeBody(r *http.Request, v any) error {
-	dec := json.NewDecoder(http.MaxBytesReader(nil, r.Body, 1<<20))
+// decodeBody 解析请求体；**真正的空体**视为 {}，让所有 POST 端点都能无体调用。
+//
+// 只认 io.EOF（一个字节都没有）。截断的 JSON 是 io.ErrUnexpectedEOF，必须报错——
+// 早先用 strings.Contains(err.Error(), "EOF") 会把它一起吞掉，导致
+// `curl -d '{"id":"trunc'` 这种半截请求被当成空请求执行（建出一个 id 为 "novel" 的项目）。
+func decodeBody(w http.ResponseWriter, r *http.Request, v any) error {
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(v); err != nil {
-		if errors.Is(err, os.ErrClosed) || err.Error() == "EOF" {
-			return nil
-		}
-		if strings.Contains(err.Error(), "EOF") {
+		if errors.Is(err, io.EOF) {
 			return nil
 		}
 		return fmt.Errorf("请求体解析失败: %w", err)
