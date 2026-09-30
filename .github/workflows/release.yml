@@ -4,6 +4,10 @@ on:
   push:
     tags:
       - "v*"
+  # 手动补发：这个 fork 上 push 触发没有排队（tag 已推上去但 workflow 没跑），
+  # 用 `gh workflow run release.yml --ref <tag>` 补。GoReleaser 要求检出点在 tag 上，
+  # 所以 dispatch 时务必带上对应 tag 作为 ref。
+  workflow_dispatch:
 
 permissions:
   contents: write
