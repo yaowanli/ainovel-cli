@@ -10,10 +10,17 @@ const (
 	StyleSkillsVersion = "style_skills.v1"
 
 	// maxStyleSkillItems 与 maxStyleSkillItemRunes 让注入写作上下文的 skill 保持
-	// "短且可执行"。刻意比仿写画像更狠（画像给 12 条）：skill 的读者是 writer，
+	// "短且可执行"。仍比仿写画像紧（画像给 12 条）：skill 的读者是 writer，
 	// 每章都要读一次，条目一多就退化成又一份读不动的画像。
-	// 上限对齐 WritingStyleRules 的既有约定（"3-5 条，每条 ≤50 字"）。
-	maxStyleSkillItems     = 5
+	//
+	// 5 → 8：实跑单文件语料后发现 5 会被顶满，10 个字段全部只出 5 条，说明
+	// 上游本有更多观察却被上限挤掉。8 条 × 10 字段实测约 1500 字，与画像
+	// 同量级，writer 读得动。
+	//
+	// 这个数字必须与 style-skill-merge.md 的"每个字段最多 N 条"一致：
+	// 落盘是全量（MarshalStyleSkills），compact 只作用于注入点，所以真正
+	// 决定产出条数的是提示词。只改常量不改提示词 = 白改；有测试钉住。
+	maxStyleSkillItems     = 8
 	maxStyleSkillItemRunes = 50
 )
 
