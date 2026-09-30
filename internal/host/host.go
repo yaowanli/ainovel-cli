@@ -24,6 +24,7 @@ import (
 	"github.com/voocel/ainovel-cli/internal/host/exp"
 	"github.com/voocel/ainovel-cli/internal/host/imp"
 	"github.com/voocel/ainovel-cli/internal/host/sim"
+	"github.com/voocel/ainovel-cli/internal/host/style"
 	runtimelog "github.com/voocel/ainovel-cli/internal/logger"
 	modelreg "github.com/voocel/ainovel-cli/internal/models"
 	"github.com/voocel/ainovel-cli/internal/notify"
@@ -1832,6 +1833,42 @@ func (h *Host) ImportSimulationProfile(ctx context.Context, path string) (<-chan
 	h.exclusiveCancel = cancel
 	h.mu.Unlock()
 	ch, err := sim.RunImport(ctx, h.store, path)
+	if err != nil {
+		h.releaseExclusive()
+		return nil, err
+	}
+	return superviseExclusive(h, ch), nil
+}
+
+// StyleSkills 读取参考语料并生成或增量更新写作/对话风格 skill。
+// 与 Simulate 一样走独占作业槽：两者都会写 meta/ 下的工件，且都是全量 LLM 调用，
+// 并发跑会互相踩。
+func (h *Host) StyleSkills(ctx context.Context, sourceDir string) (<-chan style.Event, error) {
+	if err := h.acquireExclusive("生成风格 skill"); err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	h.mu.Lock()
+	h.exclusiveCancel = cancel
+	h.mu.Unlock()
+
+	if strings.TrimSpace(sourceDir) == "" {
+		wd, err := os.Getwd()
+		if err != nil {
+			h.releaseExclusive()
+			return nil, fmt.Errorf("get working dir: %w", err)
+		}
+		sourceDir = filepath.Join(wd, "simulate")
+	}
+	deps := style.Deps{
+		Store: h.store,
+		LLM:   h.models.ForRole("architect"),
+		Prompts: style.Prompts{
+			Source: h.bundle.Prompts.StyleSkillSource,
+			Merge:  h.bundle.Prompts.StyleSkillMerge,
+		},
+	}
+	ch, err := style.Run(ctx, deps, style.Options{SourceDir: sourceDir})
 	if err != nil {
 		h.releaseExclusive()
 		return nil, err

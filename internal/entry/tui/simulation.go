@@ -14,11 +14,31 @@ import (
 	"github.com/voocel/ainovel-cli/internal/host/sim"
 )
 
+// panelEvent 是后台作业面板的归一化事件。仿写画像（sim.Event）与风格 skill
+// （style.Event）阶段语义相同但类型不同，面板只认这个结构，两个包各自在边界转换。
+type panelEvent struct {
+	at      time.Time
+	stage   string
+	current int
+	total   int
+	message string
+	err     error
+}
+
+func (e panelEvent) terminal() bool {
+	return e.stage == string(sim.StageDone) || e.stage == string(sim.StageError)
+}
+
 type simulationState struct {
-	reqID      int
-	title      string
-	source     string
-	stage      sim.Stage
+	reqID  int
+	title  string
+	source string
+	// frameTitle/failText/doneText 让同一面板能显示"仿写画像"或"风格 skill"，
+	// 避免把业务名写死在渲染里。
+	frameTitle string
+	failText   string
+	doneText   string
+	stage      string
 	current    int
 	total      int
 	startedAt  time.Time
@@ -32,7 +52,7 @@ type simulationState struct {
 
 type simulationLine struct {
 	at      time.Time
-	stage   sim.Stage
+	stage   string
 	current int
 	total   int
 	message string
@@ -41,45 +61,46 @@ type simulationLine struct {
 
 type simEventMsg struct {
 	reqID int
-	ev    sim.Event
-	ch    <-chan sim.Event
+	ev    panelEvent
+	ch    <-chan panelEvent
 }
 
-func (m simEventMsg) terminal() bool {
-	return m.ev.Stage == sim.StageDone || m.ev.Stage == sim.StageError
-}
+func (m simEventMsg) terminal() bool { return m.ev.terminal() }
 
 func newSimulationState(reqID int, title, source string, width, height int, cancel context.CancelFunc) *simulationState {
 	boxW, boxH := reportModalSize(width, height)
 	contentW := paddedModalContentWidth(boxW)
 	vp := viewport.New(contentW, boxH-4)
 	s := &simulationState{
-		reqID:     reqID,
-		title:     title,
-		source:    source,
-		stage:     sim.StageScan,
-		startedAt: time.Now(),
-		cancel:    cancel,
-		viewport:  vp,
+		reqID:      reqID,
+		title:      title,
+		source:     source,
+		frameTitle: "仿写画像",
+		failText:   "仿写画像处理失败",
+		doneText:   "仿写画像已就绪，后续 Agent 会从 novel_context 读取",
+		stage:      string(sim.StageScan),
+		startedAt:  time.Now(),
+		cancel:     cancel,
+		viewport:   vp,
 	}
 	s.refresh(contentW)
 	return s
 }
 
-func (s *simulationState) appendEvent(ev sim.Event, contentW int) {
-	s.stage = ev.Stage
-	s.current = ev.Current
-	s.total = ev.Total
-	if ev.Err != nil {
-		s.err = ev.Err
+func (s *simulationState) appendEvent(ev panelEvent, contentW int) {
+	s.stage = ev.stage
+	s.current = ev.current
+	s.total = ev.total
+	if ev.err != nil {
+		s.err = ev.err
 	}
 	s.history = append(s.history, simulationLine{
-		at: ev.Time, stage: ev.Stage, current: ev.Current, total: ev.Total,
-		message: ev.Message, err: ev.Err,
+		at: ev.at, stage: ev.stage, current: ev.current, total: ev.total,
+		message: ev.message, err: ev.err,
 	})
-	if ev.Stage == sim.StageDone || ev.Stage == sim.StageError {
+	if ev.terminal() {
 		s.done = true
-		s.finishedAt = ev.Time
+		s.finishedAt = ev.at
 	}
 	s.refresh(contentW)
 }
@@ -109,7 +130,7 @@ func (s *simulationState) refresh(contentW int) {
 	b.WriteString("\n\n")
 
 	b.WriteString(mutedStyle.Render("阶段 "))
-	b.WriteString(stageStyle.Render(string(s.stage)))
+	b.WriteString(stageStyle.Render(s.stage))
 	if s.total > 0 {
 		b.WriteString(mutedStyle.Render("  进度 "))
 		b.WriteString(fmt.Sprintf("%d/%d", s.current, s.total))
@@ -124,7 +145,7 @@ func (s *simulationState) refresh(contentW int) {
 		b.WriteString("\n")
 		b.WriteString(dimStyle.Render(ln.at.Format("15:04:05")))
 		b.WriteString(" ")
-		b.WriteString(stageStyle.Render(string(ln.stage)))
+		b.WriteString(stageStyle.Render(ln.stage))
 		if ln.total > 0 && ln.current > 0 {
 			b.WriteString(mutedStyle.Render(fmt.Sprintf(" %d/%d", ln.current, ln.total)))
 		}
@@ -141,11 +162,11 @@ func (s *simulationState) refresh(contentW int) {
 	case !s.done:
 		b.WriteString(dimStyle.Render("Esc 取消"))
 	case s.err != nil:
-		b.WriteString(errStyle.Render("仿写画像处理失败"))
+		b.WriteString(errStyle.Render(s.failText))
 		b.WriteString("\n")
 		b.WriteString(dimStyle.Render("Esc 关闭面板"))
 	default:
-		b.WriteString(okStyle.Render("仿写画像已就绪，后续 Agent 会从 novel_context 读取"))
+		b.WriteString(okStyle.Render(s.doneText))
 		b.WriteString("\n")
 		b.WriteString(dimStyle.Render("Esc 关闭面板"))
 	}
@@ -170,7 +191,7 @@ func renderSimulationModal(width, height int, s *simulationState) string {
 		s.viewport.Height = boxH - 4
 	}
 	hint := "  ↑↓ 滚动 · Esc 取消/关闭"
-	modal := renderPaddedModalFrame(boxW, boxH, "仿写画像", hint, strings.Split(s.viewport.View(), "\n"))
+	modal := renderPaddedModalFrame(boxW, boxH, s.frameTitle, hint, strings.Split(s.viewport.View(), "\n"))
 	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, modal)
 }
 
@@ -200,7 +221,9 @@ func (m Model) handleSimulationKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func startSimulate(rt *host.Host, reqID int, args []string, width, height int) (*simulationState, tea.Cmd, error) {
 	if len(args) > 0 {
-		return nil, nil, fmt.Errorf("用法：/simulate")
+		// 明确说清"不接参数"：原措辞只在多打了参数时出现，等于在最不该解释的
+		// 时候给出一句没有信息量的用法。
+		return nil, nil, fmt.Errorf("用法：/simulate（不接参数，语料目录固定为 ./simulate）")
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	ch, err := rt.Simulate(ctx)
@@ -224,14 +247,4 @@ func startImportSimulation(rt *host.Host, reqID int, args []string, width, heigh
 	}
 	state := newSimulationState(reqID, "导入仿写画像", args[0], width, height, cancel)
 	return state, listenSimulationEvent(reqID, ch), nil
-}
-
-func listenSimulationEvent(reqID int, ch <-chan sim.Event) tea.Cmd {
-	return func() tea.Msg {
-		ev, ok := <-ch
-		if !ok {
-			return nil
-		}
-		return simEventMsg{reqID: reqID, ev: ev, ch: ch}
-	}
 }

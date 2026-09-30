@@ -31,6 +31,7 @@ type Store struct {
 	Sessions       *SessionStore
 	Usage          *UsageStore
 	Simulation     *SimulationStore
+	StyleSkills    *StyleSkillsStore
 	Decisions      *DecisionStore
 	ChapterRecords *ChapterRecordStore
 	Revisions      *RevisionStore
@@ -70,6 +71,7 @@ func NewStore(dir string) *Store {
 		Sessions:       NewSessionStore(newIO(dir)),
 		Usage:          NewUsageStore(newIO(dir)),
 		Simulation:     NewSimulationStore(newIO(dir)),
+		StyleSkills:    NewStyleSkillsStore(newIO(dir)),
 		Decisions:      NewDecisionStore(newIO(dir)),
 		ChapterRecords: NewChapterRecordStore(newIO(dir)),
 		Revisions:      NewRevisionStore(newIO(dir)),

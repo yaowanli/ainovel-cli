@@ -127,8 +127,14 @@ type SimulationCompactProfile struct {
 	RoleGuidance     SimulationRoleGuidance     `json:"role_guidance,omitempty"`
 }
 
-func SimulationSourceFingerprint(relativePath, sha256 string) string {
+// SourceFingerprint 是参考语料的身份指纹：相对路径 + 内容摘要。
+// 仿写画像与风格 skill 两条管道共用，避免同一条拼接规则出现两份实现。
+func SourceFingerprint(relativePath, sha256 string) string {
 	return strings.TrimSpace(relativePath) + ":" + strings.TrimSpace(sha256)
+}
+
+func SimulationSourceFingerprint(relativePath, sha256 string) string {
+	return SourceFingerprint(relativePath, sha256)
 }
 
 func ValidateSimulationProfile(p *SimulationProfile) error {

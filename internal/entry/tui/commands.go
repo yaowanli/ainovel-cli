@@ -274,6 +274,27 @@ func commandRegistryInstance() commandRegistry {
 			},
 		},
 		{
+			Name:        "style-skills",
+			Group:       "writing",
+			Usage:       "/style-skills [语料目录]",
+			Description: "从参考语料蒸馏写作与对话风格 skill（含对白标签、称谓、语气词、口头禅、台词长度、方言）",
+			NeedsIdle:   true,
+			Run: func(m Model, args []string) (tea.Model, tea.Cmd) {
+				m.simSeq++
+				state, listenCmd, err := startStyleSkills(m.runtime, m.simSeq, args, m.width, m.height)
+				if err != nil {
+					m.applyEvent(host.Event{
+						Time: time.Now(), Category: "ERROR", Summary: "风格 skill 启动失败：" + err.Error(), Level: "error",
+					})
+					m.refreshEventViewport()
+					return m, nil
+				}
+				m.simulator = state
+				m.textarea.Blur()
+				return m, listenCmd
+			},
+		},
+		{
 			Name:        "importsim",
 			Group:       "writing",
 			Usage:       "/importsim <profile.json>",

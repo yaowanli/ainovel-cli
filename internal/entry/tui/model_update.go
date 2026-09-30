@@ -566,7 +566,8 @@ func (m Model) handleRuntimeMsg(msg tea.Msg) (tea.Model, tea.Cmd, bool) {
 		if msg.terminal() {
 			return m, nil, true
 		}
-		return m, listenSimulationEvent(msg.reqID, msg.ch), true
+		// 继续监听同一条已适配的通道；重新适配会另起 goroutine 并立刻读到 EOF。
+		return m, listenPanelEvent(msg.reqID, msg.ch), true
 	case exportDoneMsg:
 		if msg.err != nil {
 			m.applyEvent(host.Event{

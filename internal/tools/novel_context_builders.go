@@ -204,12 +204,33 @@ func (t *ContextTool) buildSimulationProfile(result map[string]any, sectionKey s
 	if compact == nil {
 		return
 	}
+	putContextSection(result, sectionKey, "simulation_profile", compact)
+}
+
+// buildStyleSkills 与 buildSimulationProfile 同构，但独立成函数：两者是不同工件
+// （画像讲结构手法，skill 讲口吻），且 skill 可能存在而画像不存在。
+func (t *ContextTool) buildStyleSkills(result map[string]any, sectionKey string, reads *contextReads) {
+	skills, err := t.store.StyleSkills.Load()
+	if err != nil {
+		reads.warn("style_skills", err)
+		return
+	}
+	compact := domain.CompactStyleSkills(skills)
+	if compact == nil {
+		return
+	}
+	putContextSection(result, sectionKey, "style_skills", compact)
+}
+
+// putContextSection 把 payload 写进 sectionKey 容器，容器不存在则按需新建——
+// 架构师路径本来没有 working_memory，需要时装一个只装该键的容器。
+func putContextSection(result map[string]any, sectionKey, key string, payload any) {
 	section, ok := result[sectionKey].(map[string]any)
 	if !ok {
 		section = map[string]any{}
 		result[sectionKey] = section
 	}
-	section["simulation_profile"] = compact
+	section[key] = payload
 }
 
 func (t *ContextTool) buildBaseContext(result map[string]any, reads *contextReads) {

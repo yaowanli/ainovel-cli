@@ -158,8 +158,10 @@ func (t *ContextTool) Execute(_ context.Context, args json.RawMessage) (json.Raw
 	// 始终输出稳定结构，避免 LLM 看到 user_rules=null 走异常分支。
 	if a.Chapter > 0 {
 		t.buildSimulationProfile(result, "working_memory", reads)
+		t.buildStyleSkills(result, "working_memory", reads)
 	} else {
 		t.buildSimulationProfile(result, "planning_memory", reads)
+		t.buildStyleSkills(result, "planning_memory", reads)
 	}
 
 	userRules := t.buildUserRules(result, reads)

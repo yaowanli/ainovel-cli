@@ -36,6 +36,8 @@ type Prompts struct {
 	ImportRange      string // 长书 Map 阶段连续区间摘要（RangeDigest）
 	SimulationSource string
 	SimulationMerge  string
+	StyleSkillSource string
+	StyleSkillMerge  string
 	RevisionAnalyze  string
 
 	// Arbiter 裁定提示词(LLM-as-function,无 simulation guidance 包装)。
@@ -175,16 +177,18 @@ func loadReferences(style string, opts LoadOptions) tools.References {
 
 func loadPrompts() Prompts {
 	return Prompts{
-		ArchitectShort:   WithSimulationGuidance(mustRead(promptsFS, "prompts/architect-short.md"), "architect"),
-		ArchitectLong:    WithSimulationGuidance(mustRead(promptsFS, "prompts/architect-long.md"), "architect"),
-		Writer:           WithSimulationGuidance(mustRead(promptsFS, "prompts/writer.md"), "writer"),
-		Editor:           WithSimulationGuidance(mustRead(promptsFS, "prompts/editor.md"), "editor"),
+		ArchitectShort:   WithStyleSkillsGuidance(mustRead(promptsFS, "prompts/architect-short.md"), "architect"),
+		ArchitectLong:    WithStyleSkillsGuidance(mustRead(promptsFS, "prompts/architect-long.md"), "architect"),
+		Writer:           WithStyleSkillsGuidance(mustRead(promptsFS, "prompts/writer.md"), "writer"),
+		Editor:           WithStyleSkillsGuidance(mustRead(promptsFS, "prompts/editor.md"), "editor"),
 		ImportSegment:    mustRead(promptsFS, "prompts/import-segment.md"),
 		ImportAnalyze:    mustRead(promptsFS, "prompts/import-analyze.md"),
 		ImportSynthesize: mustRead(promptsFS, "prompts/import-synthesize.md"),
 		ImportRange:      mustRead(promptsFS, "prompts/import-range.md"),
 		SimulationSource: mustRead(promptsFS, "prompts/simulation-source.md"),
 		SimulationMerge:  mustRead(promptsFS, "prompts/simulation-merge.md"),
+		StyleSkillSource: mustRead(promptsFS, "prompts/style-skill-source.md"),
+		StyleSkillMerge:  mustRead(promptsFS, "prompts/style-skill-merge.md"),
 		RevisionAnalyze:  mustRead(promptsFS, "prompts/revision-analyze.md"),
 
 		ArbiterPlanStart:    mustRead(promptsFS, "prompts/arbiter-plan-start.md"),
@@ -197,6 +201,13 @@ func loadPrompts() Prompts {
 // variant 覆盖时复用，保证覆盖后的 prompt 与 Load 产出的 baseline 等价（同一包装路径）。
 func WithSimulationGuidance(prompt, role string) string {
 	return prompt + "\n\n" + strings.ReplaceAll(simulationGuidance, "{{role}}", role)
+}
+
+// WithStyleSkillsGuidance 给核心 prompt 追加风格 skill 指引。导出理由同
+// WithSimulationGuidance：eval 覆盖 prompt 时必须走同一条包装路径。
+func WithStyleSkillsGuidance(prompt, role string) string {
+	return WithSimulationGuidance(prompt, role) + "\n\n" +
+		strings.ReplaceAll(styleSkillsGuidance, "{{role}}", role)
 }
 
 // OverridePrompt 用 raw 覆盖 bundle 中指定 prompt 文件对应的角色提示词，并走与 Load
@@ -236,6 +247,14 @@ const simulationGuidance = `## 仿写画像
 当 novel_context 的 planning_memory 或 working_memory 中存在 simulation_profile 时，必须把它视为当前作品的仿写方向约束。{{role}} 应读取其中的 style、lexicon、plot_design、hook_design、pacing_density、reader_engagement 和 role_guidance。
 
 使用原则：借鉴结构、节奏、钩子、信息释放和吸引读者的手法；不要复制原文句子、人物、地名、专有设定或固定桥段。若 simulation_profile 与用户显式要求冲突，优先服从用户要求。`
+
+// styleSkillsGuidance 与 simulationGuidance 分开而非合并：画像讲"结构与手法怎么搭"，
+// skill 讲"这句话该怎么说出口"。两者冲突时以 skill 为准（它更具体、更贴近口吻）。
+const styleSkillsGuidance = `## 风格 skill
+
+当 novel_context 的 planning_memory 或 working_memory 中存在 style_skills 时，{{role}} 必须把它视为当前作品的口吻约束。写作时逐条遵循 prose_skill 的叙述声音、句式节奏、描写质地与节奏规则；写对白时逐条遵循 dialogue_skill 的对白标签、称谓、语气词、口头禅模式、台词长度与方言规则。
+
+使用原则：学习说话方式，不搬运原文。style_skills 里的口头禅与方言条目是**模式描述**（例如"犹豫以反问句表达""同辈直呼其名"），不是可照抄的词表——照抄其字面即视为违规。禁止复制原文句子、人物、地名、专有设定。若 style_skills 与用户显式要求冲突，优先服从用户要求。`
 
 // loadStyles 枚举内置风格预设,再按 全局 → 本书 顺序叠加覆盖目录下 styles/*.md
 // (同名整文件替换,新文件名即新增风格;风格是整体声音,不做合并)。
