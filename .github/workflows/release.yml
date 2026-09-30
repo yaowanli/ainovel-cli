@@ -27,7 +27,9 @@ jobs:
           go-version: stable
 
       - name: Generate release notes
-        run: .github/scripts/gen-changelog.sh > release-notes.md
+        # 必须写到 checkout 之外：GoReleaser 启动时校验 git 树是否干净，
+        # 在仓库里生成 release-notes.md 会让它报 "git is in a dirty state" 而失败。
+        run: .github/scripts/gen-changelog.sh > "$RUNNER_TEMP/release-notes.md"
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -40,7 +42,7 @@ jobs:
           version: "~> v2"
           args: >-
             release --clean
-            --release-notes=release-notes.md
+            --release-notes=${{ runner.temp }}/release-notes.md
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # fork 里 tag 发布必须指向 fork 自己的账号，不能沿用写死的上游 owner。
