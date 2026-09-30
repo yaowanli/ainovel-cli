@@ -42,6 +42,40 @@ async function api(path, body) {
 
 // ── 渲染：项目列表 ──
 
+// holderLabel 说明是谁占着这本书。服务端只能确定是 ainovel 家族的哪个二进制，
+// 区分不出 TUI 与 headless（同一个可执行文件），所以文案落在"CLI/TUI"这一档。
+function holderLabel(p) {
+  const h = p.holder || {};
+  if (h.kind === 'server') return '被另一个服务端占用';
+  if (h.kind === 'cli') return '被 TUI / CLI 占用';
+  return '被其他进程占用';
+}
+
+function isLocked(p) { return !!p && p.state === 'locked'; }
+
+// 占用期间禁用全部控制按钮：服务端本来就驱动不了这本书（上游跨进程 flock），
+// 与其让用户点下去吃一个 409，不如直接置灰并说明原因。
+const CONTROLS = ['#b-resume', '#b-abort', '#b-review', '#b-auto', '#b-next', '#b-steer', '#b-continue'];
+
+function renderLockBanner() {
+  let box = document.getElementById('lockbox');
+  const p = state.projects.get(state.selected);
+  if (!isLocked(p)) { if (box) box.remove(); return; }
+  if (!box) {
+    box = el('div');
+    box.id = 'lockbox';
+    box.style.cssText = 'background:#13233d;border:1px solid #2b4a7d;color:#cfe3ff;padding:7px 9px;border-radius:6px;margin-bottom:8px;font-size:12px';
+    $('#stat').after(box);
+  }
+  const h = p.holder || {};
+  box.textContent = `本书正被 ${holderLabel(p)}（PID ${h.pid || '?'}${h.name ? ' · ' + h.name : ''}）驱动，控制已禁用。关闭那个终端后本页会自动恢复可操作；数据仍可阅读。`;
+  for (const sel of CONTROLS) { const b = $(sel); if (b) b.disabled = true; }
+}
+
+function unlockControls() {
+  for (const sel of CONTROLS) { const b = $(sel); if (b) b.disabled = false; }
+}
+
 function renderList() {
   const box = $('#list');
   box.textContent = '';
@@ -58,7 +92,11 @@ function renderList() {
     head.appendChild(st);
     card.appendChild(head);
     const sub = el('div', 'sub', `${p.id} · ${p.completed || 0} 章` + (p.total_chapters ? ` / ${p.total_chapters}` : ''));
-    if (p.dir && p.dir.indexOf('/workspace/') < 0) {
+    if (p.state === 'locked') {
+    const h = p.holder || {};
+    card.appendChild(el('div', 'sub', `${holderLabel(p)} · PID ${h.pid || '?'}`));
+  }
+  if (p.dir && p.dir.indexOf('/workspace/') < 0) {
       sub.textContent += ' · 挂载 · ' + p.dir;
       sub.title = p.dir;
     }
@@ -82,8 +120,8 @@ function stateLabel(p) {
   if (p.state === 'done') return p.phase === 'complete' ? '完本' : '已停';
   if (p.state === 'paused') return '暂停';
   if (p.state === 'idle') return '待命';
-  // locked = 同一本书正被另一个进程（多半是 TUI）驱动：数据照常显示，但服务端不能接管。
-  if (p.state === 'locked') return '被其他进程占用';
+  // locked = 同一本书正被另一个进程驱动：数据照常显示，但服务端不能接管。
+  if (p.state === 'locked') return holderLabel(p);
   return '未在服务端打开';
 }
 
@@ -100,6 +138,7 @@ function renderStat() {
   $('#cur-title').textContent = p.title || p.id;
   $('#cur-state').textContent = stateLabel(p);
   $('#cur-state').className = 'tag ' + (p.error ? 'err' : p.state);
+  if (isLocked(p)) renderLockBanner(); else { unlockControls(); const b = document.getElementById('lockbox'); if (b) b.remove(); }
 
   const kv = el('div', 'kv');
   const L = p.live || {};
@@ -227,6 +266,7 @@ function select(id) {
   clearStream();
   renderList();
   renderStat();
+  unlockControls();
   if (projES) projES.close();
   projES = new EventSource(`/api/projects/${id}/events`);
   projES.addEventListener('snapshot', (m) => {
@@ -248,6 +288,8 @@ function select(id) {
 function act(fn) {
   return async () => {
     if (!state.selected) { toast('先选一个项目'); return; }
+    const p = state.projects.get(state.selected);
+    if (isLocked(p)) { toast(holderLabel(p) + '：请先关闭那个进程'); return; }
     try { await fn(state.selected); } catch (e) { toast(e.message); }
   };
 }

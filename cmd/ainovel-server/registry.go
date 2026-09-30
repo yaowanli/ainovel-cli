@@ -1,12 +1,15 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -37,7 +40,8 @@ type Registry struct {
 
 func NewRegistry(root, base string) (*Registry, error) {
 	r := &Registry{
-		root: root, base: base,
+		root:     root,
+		base:     base,
 		projects: map[string]*Project{},
 		mounts:   map[string]mount{},
 		hub:      NewHub(),
@@ -97,13 +101,9 @@ func (r *Registry) list() []*Project {
 
 	out := make([]*Project, 0, len(ids))
 	for id := range ids {
-		var storeDir string
+		dir, storeDir := filepath.Join(r.root, id), ""
 		if m, ok := mounts[id]; ok {
-			storeDir = m.StoreDir
-		}
-		dir := filepath.Join(r.root, id)
-		if m, ok := mounts[id]; ok {
-			dir = m.Dir
+			dir, storeDir = m.Dir, m.StoreDir
 		}
 		out = append(out, r.attach(NewProject(id, dir, r.base, storeDir)))
 	}
@@ -124,8 +124,7 @@ func (r *Registry) get(id string) (*Project, error) {
 	return nil, fmt.Errorf("项目 %q 不存在", id)
 }
 
-// mountPath 是挂载表的持久化位置（workspace 下的 dotdir，不会被当成项目扫描）。
-func (r *Registry) mountPath() string { return filepath.Join(r.root, ".ainovel-server.json") }
+// ── 挂载表 ──
 
 type mount struct {
 	Dir      string `json:"dir"`
@@ -136,8 +135,10 @@ type mountFile struct {
 	Mounts map[string]mount `json:"mounts"`
 }
 
-// loadMounts 读取挂载表；文件不存在视为空。坏文件 fail loud（静默丢挂载会让人
-// 以为书丢了）。
+func (r *Registry) mountPath() string { return filepath.Join(r.root, ".ainovel-server.json") }
+
+// loadMounts 读取挂载表；文件不存在视为空。坏文件 fail loud——静默丢挂载会让人
+// 以为书丢了。
 func (r *Registry) loadMounts() error {
 	data, err := os.ReadFile(r.mountPath())
 	if errors.Is(err, os.ErrNotExist) {
@@ -189,7 +190,6 @@ func (r *Registry) Mount(id, dir string) (*Project, error) {
 	if err != nil {
 		return nil, err
 	}
-	// 挂载点不能与 workspace 内的项目同名，否则两本书抢同一个 id。
 	if filepath.Join(r.root, id) == abs {
 		return nil, fmt.Errorf("%s 已在 workspace 内，无需挂载", id)
 	}
@@ -231,6 +231,112 @@ func (r *Registry) Unmount(id string) error {
 		r.mu.Lock()
 		delete(r.projects, id)
 		r.mu.Unlock()
+	}
+	return nil
+}
+
+// ── 占用探测 ──
+
+// holder 描述占用某本书的外部进程身份。
+type holder struct {
+	Kind string `json:"kind"` // tui / cli / server / unknown
+	PID  int    `json:"pid"`
+	Name string `json:"name,omitempty"`
+}
+
+// dirLocked 探测 store 目录是否被其他进程持锁，并尽力识别持锁者是谁。
+//
+// flock 本身不暴露持有者信息，所以命中后再用 lsof 反查打开该锁文件的进程。
+// lsof 不可用或查不到时退化为 unknown——"被占用"这个事实不依赖它，只有文案受影响。
+func dirLocked(outputDir string) (bool, holder) {
+	lockPath := filepath.Join(outputDir, ".ainovel.lock")
+	lock := flock.New(lockPath, flock.SetPermissions(0o600))
+	ok, err := lock.TryLock()
+	if err != nil {
+		return false, holder{}
+	}
+	if ok {
+		// 探测锁立即释放，不影响真正要打开它的进程。
+		_ = lock.Close()
+		return false, holder{}
+	}
+	_ = lock.Close()
+	return true, identifyHolder(lockPath)
+}
+
+// identifyHolder 用 lsof 反查持锁进程，带超时并整体降级。
+func identifyHolder(lockPath string) holder {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "lsof", "-t", lockPath).Output()
+	if err != nil {
+		return holder{Kind: "unknown"}
+	}
+	first := strings.TrimSpace(strings.Split(strings.TrimSpace(string(out)), "\n")[0])
+	pid, err := strconv.Atoi(first)
+	if err != nil || pid <= 0 {
+		return holder{Kind: "unknown"}
+	}
+	h := holder{Kind: "unknown", PID: pid, Name: processName(pid)}
+	switch {
+	case strings.Contains(h.Name, "ainovel-server"):
+		h.Kind = "server"
+	case strings.Contains(h.Name, "ainovel-cli"):
+		// 上游 TUI 与 headless 是同一个二进制，这里只能确定是 CLI 家族。
+		h.Kind = "cli"
+	}
+	return h
+}
+
+// processName 取进程的可执行名，失败退化为空串。
+func processName(pid int) string {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "ps", "-o", "comm=", "-p", strconv.Itoa(pid)).Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// detectStoreDir 判断一个已存在的目录里 store 根在哪：优先 <dir>/output/novel
+// （TUI/CLI 的标准布局），否则把 dir 本身当作 store 根（用户直接指到 output/novel）。
+// 两者都不像则报错——挂载一个空目录没有意义，不如让用户先建书。
+func detectStoreDir(dir string) (string, error) {
+	nested := filepath.Join(dir, "output", "novel")
+	if isStoreDir(nested) {
+		return nested, nil
+	}
+	if isStoreDir(dir) {
+		return dir, nil
+	}
+	return "", fmt.Errorf("%s 下找不到小说数据（期望 %s 或 %s）", dir, nested, dir)
+}
+
+func isStoreDir(dir string) bool {
+	if _, err := os.Stat(filepath.Join(dir, "meta", "progress.json")); err == nil {
+		return true
+	}
+	if _, err := os.Stat(filepath.Join(dir, "chapters")); err == nil {
+		return true
+	}
+	_, err := os.Stat(filepath.Join(dir, "book.md"))
+	return err == nil
+}
+
+func validateID(id string) error {
+	if id == "" {
+		return errors.New("项目 id 不能为空")
+	}
+	if len(id) > 64 {
+		return errors.New("项目 id 过长（上限 64）")
+	}
+	for _, r := range id {
+		ok := r == '-' || r == '_' ||
+			(r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9')
+		if !ok {
+			return fmt.Errorf("项目 id 只能包含字母、数字、- 和 _（非法字符 %q）", r)
+		}
 	}
 	return nil
 }
@@ -286,23 +392,6 @@ func (r *Registry) create(id string, overrides map[string]any) (*Project, error)
 	return r.attach(NewProject(id, dir, r.base, "")), nil
 }
 
-func validateID(id string) error {
-	if id == "" {
-		return errors.New("项目 id 不能为空")
-	}
-	if len(id) > 64 {
-		return errors.New("项目 id 过长（上限 64）")
-	}
-	for _, r := range id {
-		ok := r == '-' || r == '_' ||
-			(r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9')
-		if !ok {
-			return fmt.Errorf("项目 id 只能包含字母、数字、- 和 _（非法字符 %q）", r)
-		}
-	}
-	return nil
-}
-
 // CloseAll 关闭全部已打开项目（释放 flock 租约）。
 func (r *Registry) CloseAll() {
 	r.mu.Lock()
@@ -334,22 +423,6 @@ const (
 	// 互相覆盖 checkpoint。
 	stateLocked runState = "locked"
 )
-
-// dirLocked 探测 store 目录是否被其他进程持锁。探测用 flock 自身的零成本语义：
-// TryLock 成功后立刻释放，不影响真正要打开它的那个进程。
-func dirLocked(outputDir string) bool {
-	lock := flock.New(filepath.Join(outputDir, ".ainovel.lock"), flock.SetPermissions(0o600))
-	ok, err := lock.TryLock()
-	if err != nil {
-		return false
-	}
-	if !ok {
-		_ = lock.Close()
-		return true
-	}
-	_ = lock.Close()
-	return false
-}
 
 // Project 是"一本小说"的服务端封装：目录 + 配置 + 可选的 host.Host + 事件总线。
 type Project struct {
@@ -383,31 +456,6 @@ func (p *Project) OutputDir() string {
 		return p.storeDir
 	}
 	return filepath.Join(p.Dir, "output", "novel")
-}
-
-// detectStoreDir 判断一个已存在的目录里 store 根在哪：优先 <dir>/output/novel
-// （TUI/CLI 的标准布局），否则把 dir 本身当作 store 根（用户直接指到 output/novel）。
-// 两者都不像则报错——挂载一个空目录没有意义，不如让用户先建书。
-func detectStoreDir(dir string) (string, error) {
-	nested := filepath.Join(dir, "output", "novel")
-	if isStoreDir(nested) {
-		return nested, nil
-	}
-	if isStoreDir(dir) {
-		return dir, nil
-	}
-	return "", fmt.Errorf("%s 下找不到小说数据（期望 %s 或 %s）", dir, nested, dir)
-}
-
-func isStoreDir(dir string) bool {
-	if _, err := os.Stat(filepath.Join(dir, "meta", "progress.json")); err == nil {
-		return true
-	}
-	if _, err := os.Stat(filepath.Join(dir, "chapters")); err == nil {
-		return true
-	}
-	_, err := os.Stat(filepath.Join(dir, "book.md"))
-	return err == nil
 }
 
 // open 打开项目：解析配置 → 加载文风资产 → 构造 Host。幂等。
@@ -580,8 +628,9 @@ func (p *Project) snapshotLocked() SnapshotDTO {
 
 	if p.host == nil {
 		// 区分"没人管"与"被别的进程管着"：前者可以随时打开，后者是上游独占锁的保护。
-		if dirLocked(dto.OutputDir) {
+		if locked, h := dirLocked(dto.OutputDir); locked {
 			dto.State = string(stateLocked)
+			dto.Holder = &h
 		}
 		return dto
 	}

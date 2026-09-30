@@ -25,7 +25,9 @@ type SnapshotDTO struct {
 	CostUSD         float64        `json:"cost_usd"`
 	Opened          time.Time      `json:"opened,omitzero"`
 	Error           string         `json:"error,omitempty"`
-	Snapshot        *UISnapshotDTO `json:"live,omitempty"`
+	// Holder 仅在 state=locked 时有值：占用这本书的外部进程身份。
+	Holder   *holder         `json:"holder,omitempty"`
+	Snapshot *UISnapshotDTO `json:"live,omitempty"`
 }
 
 // UISnapshotDTO 映射 host.UISnapshot，只暴露前端用得到的字段。

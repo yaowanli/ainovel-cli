@@ -95,6 +95,20 @@ go build -o ../bin/ainovel-server ./cmd/ainovel-server
 goroutine**（`Project.pump`）持续消费，再扇出给各 SSE 订阅者；每个订阅者独立
 缓冲（512 条），满了丢自己的旧数据。慢浏览器不会反压到引擎。
 
+## 占用检测（locked）
+
+同一本书**不能**被两个实例同时驱动：上游 `internal/host/book_lock.go` 对 store 目录
+持有跨进程 `flock` 独占锁，两个 Engine 会互相覆盖 checkpoint。服务端不去绕开这个
+护栏，而是把它变成一个可观测状态：
+
+- 快照里 `state=locked` + `holder: {kind, pid, name}`。`kind` 靠 `lsof` 反查持锁进程
+  的可执行名得到（`server` / `cli` / `unknown`）——`flock` 本身不暴露持有者信息，
+  `lsof` 不可用时退化为 `unknown`，但"被占用"这个事实不依赖它。
+- 占用期间前端禁用全部控制按钮并显示占用者 PID；正文与进度照常可读（读的是磁盘事实）。
+- 真正的接管仍然由上游裁决：这时任何控制端点都会拿到 `ErrBookInUse`。
+
+注意 `kind=cli` 无法区分 TUI 与 headless——上游两者是同一个可执行文件。
+
 ## 已知取舍
 
 - **不启用每本书的 `logs/*.log` 文件日志**。上游 `host.WithFileLog` 会替换
