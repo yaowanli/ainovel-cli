@@ -11,8 +11,16 @@ import (
 )
 
 // Handler 组装 HTTP 路由：REST 控制面 + SSE 事件流 + 内嵌单页前端。
-func (r *Registry) Handler(cors bool) http.Handler {
+//
+// allow 为空 = 只允许同源（默认）。token 非空时所有 /api 请求都要带
+// Authorization: Bearer <token>——EventSource 不会自定义请求头，所以启用 token
+// 后前端 SSE 需要改用 fetch 读取流。
+func (r *Registry) Handler(allow map[string]bool, token string) http.Handler {
 	mux := http.NewServeMux()
+	var h http.Handler = mux
+	if token != "" {
+		h = guard(mux, token)
+	}
 
 	mux.HandleFunc("GET /api/health", func(w http.ResponseWriter, req *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{
@@ -301,10 +309,24 @@ func (r *Registry) Handler(cors bool) http.Handler {
 
 	mux.Handle("GET /", http.StripPrefix("/", webui.Handler()))
 
-	if !cors {
-		return mux
+	if len(allow) == 0 {
+		return h
 	}
-	return corsMiddleware(mux)
+	return corsMiddleware(h, allow)
+}
+
+// guard 校验 Authorization: Bearer。放在最外层，CORS 头由内层处理，
+// 这样未授权的请求连路由都进不去。
+func guard(next http.Handler, token string) http.Handler {
+	want := "Bearer " + token
+	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if strings.HasPrefix(req.URL.Path, "/api/") && req.Header.Get("Authorization") != want {
+			w.Header().Set("WWW-Authenticate", `Bearer realm="ainovel"`)
+			writeErr(w, http.StatusUnauthorized, fmt.Errorf("缺少或错误的 Authorization: Bearer token"))
+			return
+		}
+		next.ServeHTTP(w, req)
+	})
 }
 
 func respond(w http.ResponseWriter, p *Project, err error) {
@@ -320,11 +342,19 @@ func respond(w http.ResponseWriter, p *Project, err error) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "snapshot": p.Snapshot()})
 }
 
-func corsMiddleware(next http.Handler) http.Handler {
+// corsMiddleware 只对显式列出的来源回显 CORS 头；其它来源不带任何 CORS 头，
+// 浏览器的同源策略会直接挡住响应。
+func corsMiddleware(next http.Handler, allow map[string]bool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Last-Event-ID")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+		origin := strings.ToLower(r.Header.Get("Origin"))
+		if origin != "" && allow[origin] {
+			h := w.Header()
+			h.Set("Access-Control-Allow-Origin", origin)
+			h.Set("Vary", "Origin")
+			h.Set("Access-Control-Allow-Headers", "Content-Type, Last-Event-ID, Authorization")
+			h.Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+			h.Set("Access-Control-Max-Age", "600")
+		}
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return

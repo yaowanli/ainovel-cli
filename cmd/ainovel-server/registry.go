@@ -575,6 +575,13 @@ func (p *Project) current() *host.Host {
 func (p *Project) Close() {
 	p.ctrlMu.Lock()
 	defer p.ctrlMu.Unlock()
+	// pumped 必须在"没有 Host"时也复位：否则一次 pump 启动过、Host 已被摘掉的
+	// Project 会永久停留在 pumped=true，之后重新打开就得到一个没有事件消费者的
+	// Host（事件通道塞满后丢最旧，SSE 永远静默）。
+	p.stateMu.Lock()
+	p.pumped = false
+	p.stateMu.Unlock()
+
 	h := p.current()
 	if h == nil {
 		return
@@ -585,7 +592,6 @@ func (p *Project) Close() {
 	h.Close()
 	p.stateMu.Lock()
 	p.state = stateClosed
-	p.pumped = false // 重开必须重新起泵，否则新 Host 的事件通道无人消费、只进不出
 	p.stateMu.Unlock()
 	p.invalidateHolder()
 	p.publishState()
@@ -685,8 +691,7 @@ func (p *Project) Snapshot() SnapshotDTO {
 		State: string(state), Opened: opened, Error: lastErr,
 	}
 
-	h := p.current()
-	if h == nil {
+	if p.current() == nil {
 		// 未打开：只读磁盘事实，让列表页在没有任何 Host 的情况下也能出内容。
 		p.fillOffline(&dto)
 		// 区分"没人管"与"被别的进程管着"。探测在锁外做，带 TTL 缓存 + 单飞——
@@ -701,8 +706,17 @@ func (p *Project) Snapshot() SnapshotDTO {
 	// 已打开：host.Snapshot() 自己会读 progress/book/runmeta（读得更全，还带 outline、
 	// 角色、resumeLabel），这里不再重复读一遍 store——对一本 200 章的完本小说，那
 	// 意味着每次快照多 200 次文件读，而结果有一半被 DTO 丢掉。
-	ui := h.Snapshot()
-	p.fillLive(&dto, ui)
+	//
+	// 整个调用期间持有 hostMu.RLock：Close() 要拿写锁才能把指针摘掉并在之后
+	// h.Close()，所以"读者拿到指针后 Close 并发跑 engine.abort/usage.SaveNow"这个
+	// 无同步窗口被彻底关掉。RLock 的持有时间是毫秒级（纯本地读盘），不会重现
+	// 之前那种"读路径被 LLM 调用堵住"的问题——所以控制面路径刻意**不**走这里。
+	p.hostMu.RLock()
+	h := p.host
+	if h != nil {
+		p.fillLive(&dto, h.Snapshot())
+	}
+	p.hostMu.RUnlock()
 	return dto
 }
 

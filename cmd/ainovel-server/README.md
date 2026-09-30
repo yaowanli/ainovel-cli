@@ -48,6 +48,9 @@ go build -o ../bin/ainovel-server ./cmd/ainovel-server
 
 # 在本仓库根目录启动（这里的 ./.ainovel/config.json 是所有项目的共享基底）
 ./bin/ainovel-server -workspace workspace -base . -addr 127.0.0.1:8787
+
+# 跨域 / 加鉴权（两者都是显式开启，默认什么都不开）
+./bin/ainovel-server -origin http://127.0.0.1:5173 -token $(openssl rand -hex 16)
 ```
 
 参数：
@@ -57,7 +60,8 @@ go build -o ../bin/ainovel-server ./cmd/ainovel-server
 | `-addr` | `127.0.0.1:8787` | HTTP 监听地址 |
 | `-workspace` | `workspace` | 项目根目录，每本书一个子目录 |
 | `-base` | `.` | 共享配置基底目录（其 `.ainovel/config.json` 对所有项目生效） |
-| `-openapi` | `true` | 允许跨域访问 API |
+| `-origin` | 空（仅同源） | 允许跨域的来源，逗号分隔。**不支持 `*`**：本服务无 CSRF 防护且能消耗 API 额度，通配等于把控制面敞开给任何网页 |
+| `-token` | 空 | 启用后 `/api/*` 需带 `Authorization: Bearer <token>`（页面本身不校验） |
 | `-v` | `false` | 调试日志 |
 
 打开 <http://127.0.0.1:8787> 即是控制台。
@@ -119,5 +123,7 @@ goroutine**（`Project.pump`）持续消费，再扇出给各 SSE 订阅者；�
   `simulate/` 目录，与"一进程多本书"冲突，需要先把 SourceDir 参数化才能安全暴露。
 - **`/import` 未开 HTTP 端点**。管线本身已经全异步（`<-chan imp.Event`），但它会
   长期占用 `host.exclusive`，暴露前需要补取消与进度端点。
+- **启用 `-token` 后前端 SSE 会失效**：`EventSource` 不能自定义请求头。此时要么同源使用，
+  要么把前端改成 `fetch` + `ReadableStream` 读 SSE。
 - **重启即失忆**。服务端内存态（运行中的 Host）随进程退出消失，但**创作进度不会
   丢**——重启后对每个项目调 `/resume` 即可从 checkpoint 续跑。

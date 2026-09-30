@@ -25,6 +25,8 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
+	"strings"
 	"syscall"
 	"time"
 
@@ -37,7 +39,8 @@ func main() {
 		addr      = flag.String("addr", "127.0.0.1:8787", "HTTP 监听地址")
 		workspace = flag.String("workspace", "workspace", "项目根目录，每本书一个子目录")
 		baseDir   = flag.String("base", ".", "所有项目共享的配置基底目录（其 ./.ainovel/config.json）")
-		openAPI   = flag.Bool("openapi", false, "允许跨域访问 API（危险：任何网页都能驱动本机创作并消耗额度）")
+		origins   = flag.String("origin", "", "允许跨域访问的来源，逗号分隔（默认只允许同源；跨域必须显式列出具体 origin，不支持 *）")
+		token     = flag.String("token", "", "启用后所有 /api 请求需带 Authorization: Bearer <token>")
 		verbose   = flag.Bool("v", false, "输出调试日志")
 	)
 	flag.Parse()
@@ -73,9 +76,15 @@ func main() {
 	}
 	defer reg.CloseAll()
 
+	allow := parseOrigins(*origins)
+	if *token == "" && len(allow) > 0 {
+		slog.Warn("已允许跨域访问且未设置 -token：能访问本机 8787 端口的网页都可以驱动创作并消耗 API 额度",
+			"origins", strings.Join(sortedKeys(allow), ","))
+	}
+
 	srv := &http.Server{
 		Addr:              *addr,
-		Handler:           reg.Handler(*openAPI),
+		Handler:           reg.Handler(allow, *token),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
@@ -127,6 +136,34 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 func writeErr(w http.ResponseWriter, status int, err error) {
 	writeJSON(w, status, map[string]string{"error": err.Error()})
+}
+
+// sortedKeys 让日志里的来源列表稳定可读。
+func sortedKeys(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// parseOrigins 解析 -origin。刻意不支持 "*"：本服务没有 CSRF 防护、且能消耗
+// API 额度，通配等于把控制面敞开给任何网页。要跨域就必须逐个列出具体来源。
+func parseOrigins(raw string) map[string]bool {
+	out := map[string]bool{}
+	for _, o := range strings.Split(raw, ",") {
+		o = strings.TrimSpace(o)
+		if o == "" {
+			continue
+		}
+		if o == "*" {
+			slog.Warn("忽略 -origin 中的 *：跨域必须显式列出具体来源")
+			continue
+		}
+		out[strings.ToLower(o)] = true
+	}
+	return out
 }
 
 // decodeBody 解析请求体；**真正的空体**视为 {}，让所有 POST 端点都能无体调用。
