@@ -83,6 +83,13 @@
 
 - **全书级固化（style_stats）**：`episodic_memory.style_stats`（如有）是代码对全部已写章节的确定性统计：句式模式类计数（patterns，含章均 per_chapter）、近期高频短语（top_phrases）、跨章逐字重复句（repeated_sentences）、章末形态（ending.short_ratio 为短句收尾章占比）、开篇时间词率（opening_time_rate）、标题格式混用（title_formats）。审阅窗口内每处都"正常"的句式，全书章均几十次就是病——当某模式章均次数明显异常、章末短句占比逼近 1、同一长句跨多章复现、标题格式混用时，必须在 aesthetic（标题问题归 consistency）出 issue 并直接引用统计数字。统计只给事实，是否成病由你按题材与文风裁定。
 
+- **目标语料对照（style_skills）**：`working_memory.style_skills`（如有）是本书目标语料的写作与对话风格 skill，由参考语料蒸馏而来（`prose_skill` 叙述声音 / 句式节奏 / 描写质地 / 节奏，`dialogue_skill` 对白标签 / 称谓 / 语气词 / 口头禅模式 / 台词长度 / 方言）。存在时，它给 AI 味提供一个比通用病症表更硬的判据：**偏离目标语料**，而不只是"像不像典型 AI 文"。同一部作品在冷峻语料里"我心头一紧"是 AI 腔，在絮叨生活流语料里四字成语堆砌才是 AI 腔——判据随语料变，才说得清。请逐类对照原文：正文的对白标签、称谓、语气词、台词长度是否落在 `dialogue_skill` 描述的范围内？叙述声音与句式节奏是否落在 `prose_skill` 内？偏离时引用原文段落与对应 skill 条目，说明偏离在哪、该怎么调回。
+
+  三点边界，务必遵守：
+  1. skill 条目是**模式描述**（如"同辈直呼其名""犹豫以反问句表达"），不是可照抄的词表。照搬 skill 字面不构成偏离；偏离指的是**没按那个模式写**。
+  2. 偏离本身只作 `warning`，**不得单独升级为 `error` 或据此触发返工**，除非同时命中 `anti_ai_tone` 的具体条目。理由见下方"判定标准"——verdict 保障的是连贯与逻辑，不是文笔完美。
+  3. 合乎目标语料的写法即便"不像典型 AI 文"也不算缺陷（例如刻意违反常见套路、语料本身就口语跳脱）。skill 是标尺不是枷锁。
+
 ### 3b. 用户规则（user_rules）
 
 `novel_context` 返回的 `working_memory.user_rules` 是用户对本书的偏好：
@@ -136,6 +143,8 @@ verdict 的目的是**保障叙事连贯性和逻辑正确性**，而不是追�
 - **rewrite**：存在 critical 级别问题（逻辑硬伤、设定矛盾）→ 必须 rewrite
 - **polish**：无 critical，但有影响阅读体验的 error 级问题 → polish
 - **accept**：只有 warning 或无问题 → accept（这是最常见的结果）
+
+"整章 AI 味浓重"（error）指全章系统性铺满套话与情绪贴标签，而非单处瑕疵；仅偏离 `style_skills` 而未命中 `anti_ai_tone` 的，一律按 warning 处理。
 
 **问题章节必须精确**：`issues[].chapters` 只标注证据真正出现的章节；只有确实需要立即修改的问题才设 `requires_change=true`。不要因为“整体风格可以更好”把整个范围入队，审美层面的 warning 通常不需要立即返工。
 不要因为 contract 写得积极、但章节本身完成了更合理的叙事取舍，就轻易判成 rewrite。优先判断是否伤害连贯性、逻辑和阅读体验，而不是是否逐项完成计划表。
