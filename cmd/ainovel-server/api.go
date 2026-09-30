@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"net/http"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -99,6 +100,39 @@ func (r *Registry) Handler(cors bool) http.Handler {
 		writeJSON(w, http.StatusCreated, map[string]any{
 			"id": p.ID, "started": strings.TrimSpace(body.Prompt) != "", "snapshot": p.Snapshot(),
 		})
+	})
+
+	// 挂载：把任意已存在的书目录登记为项目（不移动数据）。
+	mux.HandleFunc("POST /api/projects/mount", func(w http.ResponseWriter, req *http.Request) {
+		var body struct {
+			ID  string `json:"id"`
+			Dir string `json:"dir"`
+		}
+		if err := decodeBody(req, &body); err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		if body.Dir == "" {
+			writeErr(w, http.StatusBadRequest, fmt.Errorf("必须提供书目录 dir"))
+			return
+		}
+		if body.ID == "" {
+			body.ID = slugify(filepath.Base(filepath.Clean(body.Dir)))
+		}
+		p, err := r.Mount(body.ID, body.Dir)
+		if err != nil {
+			writeErr(w, http.StatusConflict, err)
+			return
+		}
+		writeJSON(w, http.StatusCreated, map[string]any{"id": p.ID, "snapshot": p.Snapshot()})
+	})
+
+	mux.HandleFunc("DELETE /api/projects/{id}/mount", func(w http.ResponseWriter, req *http.Request) {
+		if err := r.Unmount(req.PathValue("id")); err != nil {
+			writeErr(w, http.StatusConflict, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	})
 
 	mux.HandleFunc("GET /api/projects/{id}", func(w http.ResponseWriter, req *http.Request) {

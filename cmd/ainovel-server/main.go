@@ -67,7 +67,10 @@ func main() {
 
 	slog.Info("共享配置基底目录", "base", base)
 
-	reg := NewRegistry(ws, base)
+	reg, err := NewRegistry(ws, base)
+	if err != nil {
+		fatal("加载挂载表失败: %v", err)
+	}
 	defer reg.CloseAll()
 
 	srv := &http.Server{

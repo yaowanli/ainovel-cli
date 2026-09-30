@@ -115,3 +115,7 @@ func NewEventPayload(ev host.Event) EventPayload {
 func jsonIndent(v any) ([]byte, error) {
 	return json.MarshalIndent(v, "", "  ")
 }
+
+func jsonMarshalIndent(v any) ([]byte, error) { return jsonIndent(v) }
+
+func jsonUnmarshal(data []byte, v any) error { return json.Unmarshal(data, v) }

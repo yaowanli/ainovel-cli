@@ -28,12 +28,19 @@ type Registry struct {
 
 	mu       sync.RWMutex
 	projects map[string]*Project
+	mounts   map[string]mount
 
 	hub *Hub // 全局事件总线（项目列表页订阅这一路即可）
 }
 
-func NewRegistry(root, base string) *Registry {
-	return &Registry{root: root, base: base, projects: map[string]*Project{}, hub: NewHub()}
+func NewRegistry(root, base string) (*Registry, error) {
+	r := &Registry{
+		root: root, base: base,
+		projects: map[string]*Project{},
+		mounts:   map[string]mount{},
+		hub:      NewHub(),
+	}
+	return r, r.loadMounts()
 }
 
 // Workspace 返回项目根目录。
@@ -61,7 +68,7 @@ func (r *Registry) lookup(id string) (*Project, bool) {
 	return p, ok
 }
 
-// list 扫描 workspace 下的子目录，并上内存表中已登记的项目。
+// list = workspace 子目录 ∪ 已挂载的外部书目录 ∪ 内存表。
 func (r *Registry) list() []*Project {
 	entries, err := os.ReadDir(r.root)
 	if err != nil {
@@ -77,11 +84,26 @@ func (r *Registry) list() []*Project {
 	for id := range r.projects {
 		ids[id] = true
 	}
+	mounts := make(map[string]mount, len(r.mounts))
+	for k, v := range r.mounts {
+		mounts[k] = v
+	}
 	r.mu.RUnlock()
+	for id := range mounts {
+		ids[id] = true
+	}
 
 	out := make([]*Project, 0, len(ids))
 	for id := range ids {
-		out = append(out, r.attach(NewProject(id, filepath.Join(r.root, id), r.base)))
+		var storeDir string
+		if m, ok := mounts[id]; ok {
+			storeDir = m.StoreDir
+		}
+		dir := filepath.Join(r.root, id)
+		if m, ok := mounts[id]; ok {
+			dir = m.Dir
+		}
+		out = append(out, r.attach(NewProject(id, dir, r.base, storeDir)))
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out
@@ -98,6 +120,117 @@ func (r *Registry) get(id string) (*Project, error) {
 		}
 	}
 	return nil, fmt.Errorf("项目 %q 不存在", id)
+}
+
+// mountPath 是挂载表的持久化位置（workspace 下的 dotdir，不会被当成项目扫描）。
+func (r *Registry) mountPath() string { return filepath.Join(r.root, ".ainovel-server.json") }
+
+type mount struct {
+	Dir      string `json:"dir"`
+	StoreDir string `json:"store_dir"`
+}
+
+type mountFile struct {
+	Mounts map[string]mount `json:"mounts"`
+}
+
+// loadMounts 读取挂载表；文件不存在视为空。坏文件 fail loud（静默丢挂载会让人
+// 以为书丢了）。
+func (r *Registry) loadMounts() error {
+	data, err := os.ReadFile(r.mountPath())
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var mf mountFile
+	if err := jsonUnmarshal(data, &mf); err != nil {
+		return fmt.Errorf("挂载表 %s 解析失败: %w", r.mountPath(), err)
+	}
+	r.mu.Lock()
+	r.mounts = mf.Mounts
+	if r.mounts == nil {
+		r.mounts = map[string]mount{}
+	}
+	r.mu.Unlock()
+	return nil
+}
+
+func (r *Registry) saveMountsLocked() error {
+	data, err := jsonMarshalIndent(mountFile{Mounts: r.mounts})
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(r.root, 0o755); err != nil {
+		return err
+	}
+	tmp := r.mountPath() + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, r.mountPath())
+}
+
+// Mount 把一个已存在的书目录登记为项目。dir 可以是 TUI 的工作目录（含
+// output/novel），也可以直接是 store 根。不移动任何数据。
+func (r *Registry) Mount(id, dir string) (*Project, error) {
+	id = strings.TrimSpace(id)
+	if err := validateID(id); err != nil {
+		return nil, err
+	}
+	abs, err := filepath.Abs(strings.TrimSpace(dir))
+	if err != nil {
+		return nil, fmt.Errorf("解析目录失败: %w", err)
+	}
+	storeDir, err := detectStoreDir(abs)
+	if err != nil {
+		return nil, err
+	}
+	// 挂载点不能与 workspace 内的项目同名，否则两本书抢同一个 id。
+	if filepath.Join(r.root, id) == abs {
+		return nil, fmt.Errorf("%s 已在 workspace 内，无需挂载", id)
+	}
+
+	r.mu.Lock()
+	if _, ok := r.mounts[id]; ok {
+		r.mu.Unlock()
+		return nil, fmt.Errorf("项目 %q 已挂载", id)
+	}
+	if r.mounts == nil {
+		r.mounts = map[string]mount{}
+	}
+	r.mounts[id] = mount{Dir: abs, StoreDir: storeDir}
+	err = r.saveMountsLocked()
+	r.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	slog.Info("已挂载外部书目录", "id", id, "dir", abs, "store", storeDir)
+	return r.attach(NewProject(id, abs, r.base, storeDir)), nil
+}
+
+// Unmount 取消挂载（不动磁盘数据）。workspace 内的项目不接受此操作。
+func (r *Registry) Unmount(id string) error {
+	r.mu.Lock()
+	if _, ok := r.mounts[id]; !ok {
+		r.mu.Unlock()
+		return fmt.Errorf("项目 %q 不是挂载项", id)
+	}
+	delete(r.mounts, id)
+	err := r.saveMountsLocked()
+	p := r.projects[id]
+	r.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	if p != nil {
+		p.Close()
+		r.mu.Lock()
+		delete(r.projects, id)
+		r.mu.Unlock()
+	}
+	return nil
 }
 
 // create 新建项目目录并初始化项目级配置（骨架继承当前有效配置）。
@@ -148,7 +281,7 @@ func (r *Registry) create(id string, overrides map[string]any) (*Project, error)
 	if err := writeJSONFile(filepath.Join(dir, ".ainovel", "config.json"), skeleton); err != nil {
 		return nil, err
 	}
-	return r.attach(NewProject(id, dir, r.base)), nil
+	return r.attach(NewProject(id, dir, r.base, "")), nil
 }
 
 func validateID(id string) error {
@@ -197,9 +330,10 @@ const (
 
 // Project 是"一本小说"的服务端封装：目录 + 配置 + 可选的 host.Host + 事件总线。
 type Project struct {
-	ID   string
-	Dir  string
-	base string // 共享配置基底目录
+	ID       string
+	Dir      string
+	storeDir string // 显式 store 目录；空 = <Dir>/output/novel
+	base     string // 共享配置基底目录
 
 	mu      sync.Mutex // 串行化控制面调用（start/steer/next/abort/model 切换）
 	host    *host.Host
@@ -212,15 +346,46 @@ type Project struct {
 	pumped  bool
 }
 
-func NewProject(id, dir, base string) *Project {
-	return &Project{ID: id, Dir: dir, base: base, state: stateClosed, hub: NewHub()}
+func NewProject(id, dir, base, storeDir string) *Project {
+	return &Project{ID: id, Dir: dir, storeDir: storeDir, base: base, state: stateClosed, hub: NewHub()}
 }
 
 // Hub 暴露本项目的事件总线。
 func (p *Project) Hub() *Hub { return p.hub }
 
-// OutputDir 是本书的 store 根目录（与 TUI 语义一致：<项目目录>/output/novel）。
-func (p *Project) OutputDir() string { return filepath.Join(p.Dir, "output", "novel") }
+// OutputDir 是本书的 store 根目录。默认沿用 TUI 语义 <项目目录>/output/novel；
+// 挂载外部书目录时可以显式指定（见 detectStoreDir）。
+func (p *Project) OutputDir() string {
+	if p.storeDir != "" {
+		return p.storeDir
+	}
+	return filepath.Join(p.Dir, "output", "novel")
+}
+
+// detectStoreDir 判断一个已存在的目录里 store 根在哪：优先 <dir>/output/novel
+// （TUI/CLI 的标准布局），否则把 dir 本身当作 store 根（用户直接指到 output/novel）。
+// 两者都不像则报错——挂载一个空目录没有意义，不如让用户先建书。
+func detectStoreDir(dir string) (string, error) {
+	nested := filepath.Join(dir, "output", "novel")
+	if isStoreDir(nested) {
+		return nested, nil
+	}
+	if isStoreDir(dir) {
+		return dir, nil
+	}
+	return "", fmt.Errorf("%s 下找不到小说数据（期望 %s 或 %s）", dir, nested, dir)
+}
+
+func isStoreDir(dir string) bool {
+	if _, err := os.Stat(filepath.Join(dir, "meta", "progress.json")); err == nil {
+		return true
+	}
+	if _, err := os.Stat(filepath.Join(dir, "chapters")); err == nil {
+		return true
+	}
+	_, err := os.Stat(filepath.Join(dir, "book.md"))
+	return err == nil
+}
 
 // open 打开项目：解析配置 → 加载文风资产 → 构造 Host。幂等。
 //

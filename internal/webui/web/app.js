@@ -57,7 +57,12 @@ function renderList() {
     const st = el('span', 'tag ' + (p.error ? 'err' : p.state), stateLabel(p));
     head.appendChild(st);
     card.appendChild(head);
-    card.appendChild(el('div', 'sub', `${p.id} · ${p.completed || 0} 章` + (p.total_chapters ? ` / ${p.total_chapters}` : '')));
+    const sub = el('div', 'sub', `${p.id} · ${p.completed || 0} 章` + (p.total_chapters ? ` / ${p.total_chapters}` : ''));
+    if (p.dir && p.dir.indexOf('/workspace/') < 0) {
+      sub.textContent += ' · 挂载 · ' + p.dir;
+      sub.title = p.dir;
+    }
+    card.appendChild(sub);
     if (p.cost_usd) card.appendChild(el('div', 'sub', `花费 $${p.cost_usd.toFixed(2)}`));
     if (p.total_chapters && p.completed < p.total_chapters) {
       const bar = el('div', 'bar');
@@ -257,6 +262,15 @@ $('#np-go').onclick = async () => {
   } catch (e) { toast(e.message); }
 };
 $('#np-scan').onclick = async () => { await api('/api/projects'); connectGlobal(); };
+$('#mt-go').onclick = async () => {
+  const dir = $('#mt-dir').value.trim();
+  if (!dir) { toast('填书目录绝对路径'); return; }
+  try {
+    const r = await api('/api/projects/mount', { dir });
+    $('#mt-dir').value = '';
+    select(r.id);
+  } catch (e) { toast(e.message); }
+};
 
 $('#b-resume').onclick = act((id) => api(`/api/projects/${id}/resume`, {}));
 $('#b-abort').onclick = act((id) => api(`/api/projects/${id}/abort`, {}));
