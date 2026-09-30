@@ -110,6 +110,7 @@ changelog:
 
 release:
   github:
-    # 不写死 owner：留空时 GoReleaser 从 git remote 推断发布目标。
-    # 在 fork 里发布才不会误指向上游 voocel/ainovel-cli（那会因无权限而失败）。
+    # 由 workflow 注入 github.repository_owner：上游发布到 voocel，fork 发布到
+    # 自己的账号。写死 voocel 会让 fork 的 tag 发布因无权限而失败。
+    owner: "{{ .Env.RELEASE_OWNER }}"
     name: ainovel-cli

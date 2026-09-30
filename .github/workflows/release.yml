@@ -43,3 +43,5 @@ jobs:
             --release-notes=release-notes.md
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # fork 里 tag 发布必须指向 fork 自己的账号，不能沿用写死的上游 owner。
+          RELEASE_OWNER: ${{ github.repository_owner }}
