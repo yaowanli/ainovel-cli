@@ -37,12 +37,12 @@ func TestValidateID(t *testing.T) {
 
 func TestSlugify(t *testing.T) {
 	cases := map[string]string{
-		"写一本东方玄幻长篇":         "novel", // 纯中文无 ASCII 可用，退回默认
+		"写一本东方玄幻长篇": "novel", // 纯中文无 ASCII 可用，退回默认
 		// 非 ASCII 字符被丢弃，id 保持 URL 安全可读
 		"写 a 悬疑 short story": "a-short-story",
 		"My Novel: 都市悬疑":     "my-novel",
-		"":                  "novel",
-		"---":               "novel",
+		"":                   "novel",
+		"---":                "novel",
 	}
 	for in, want := range cases {
 		if got := slugify(in); got != want {
