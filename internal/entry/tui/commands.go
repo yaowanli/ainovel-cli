@@ -143,6 +143,16 @@ func commandRegistryInstance() commandRegistry {
 			},
 		},
 		{
+			Name:        "rework",
+			Group:       "writing",
+			Usage:       "/rework <章号>|<起>-<止>|status|stop",
+			Description: "逐章返工已写章节：先评审，确有问题才重写",
+			Run: func(m Model, args []string) (tea.Model, tea.Cmd) {
+				next, _ := runRework(m, args)
+				return next, nil
+			},
+		},
+		{
 			Name:        "next",
 			Group:       "writing",
 			Usage:       "/next",

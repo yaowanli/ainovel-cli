@@ -95,6 +95,7 @@ type State struct {
 //  3. PendingRewrites 非空  → writer 按队列重写/打磨
 //  4. Flow=Reviewing        → nil（dormant：当前无写入者，评审期 Flow 实为 writing）
 //  5. Flow=Steering         → nil（用户干预处理中）
+//     5.5 逐章返工 pass       → editor 逐章评审（游标未过终点时；见下方注释）
 //  6. 外部修订导致聚合工件失效 → editor 重建
 //  7. 外部修订影响后续规划     → architect 处理
 //  8. 分层书到达弧末          → 评审、摘要、扩弧或续卷
@@ -158,6 +159,37 @@ func Route(s State) *Instruction {
 	if p.Flow == domain.FlowSteering {
 		return nil
 	}
+
+	// 5.5 逐章返工 pass（/rework）：游标未过终点 → editor 评该章。
+	//
+	// 位置是本功能的核心约束：
+	//   - 必须在第 3 条 PendingRewrites 之下。某章被判 requires_change 后，
+	//     writer 要先把它改完才评下一章，两者交错会让"已评审待改"与
+	//     "改完待确认"两种进度无法区分。
+	//   - 必须在 AggregateRefresh 之上。否则"缺弧摘要/缺卷摘要"会持续把
+	//     editor 派走，pass 永远推不到下一章。
+	//   - 天然压住第 11 条 writer 写下一章，所以不需要额外的暂停续写开关。
+	//
+	// 游标由 save_review 在落盘评审结果的同一事务内推进（见
+	// store.advanceReworkPass），所以这里每轮看到的都是"尚未评审"的章。
+	// Cursor > EndChapter 时本分支自然落空，路由自动恢复续写。
+	if pass := p.ReworkPass; pass.Active() {
+		c := pass.Cursor
+		return &Instruction{
+			Agent: "editor",
+			Task: fmt.Sprintf(
+				"返工评审第 %d 章：调用 novel_context(chapter=%d) 读取该章，save_review 使用 scope=chapter、chapter=%d。"+
+					"这是作者主动发起的逐章返工（本次目标是把该章改到符合当前 anti_ai_tone 与 style_skills 判据），"+
+					"不是常规质量抽检：请对照 working_memory.style_skills 与 reference_pack.references.anti_ai_tone 逐项检查"+
+					"（对话是否同质化、是否有答非所问与打断、句长是否整齐、是否存在解释性与升华、角色身体反应是否是通用模板），"+
+					"确有违反才标 requires_change。working_memory.forward_continuity 列出后续已定稿章节，改法不得与其冲突。",
+				c, c, c,
+			),
+			Reason:  fmt.Sprintf("逐章返工 pass：第 %d/%d 章", c-pass.StartChapter+1, pass.Total()),
+			Chapter: c,
+		}
+	}
+
 	if refresh := s.AggregateRefresh; refresh != nil {
 		switch refresh.Kind {
 		case AggregateArcReview:

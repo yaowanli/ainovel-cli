@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/voocel/ainovel-cli/internal/domain"
 	"github.com/voocel/ainovel-cli/internal/store"
@@ -820,5 +821,59 @@ func TestSaveFoundationCompleteBookRejectsWithPendingRewrites(t *testing.T) {
 	progress, _ := s.Progress.Load()
 	if progress.Phase == domain.PhaseComplete {
 		t.Fatalf("phase should not be Complete with PendingRewrites: %s", progress.Phase)
+	}
+}
+
+// 逐章返工 pass 未跑完时同样不许收尾：还有章没被评审过，此时完本等于把
+// 未检查的内容定稿。
+func TestSaveFoundationCompleteBookRejectsWithActiveReworkPass(t *testing.T) {
+	s := completeBookSetup(t)
+	if err := s.Progress.MarkChapterComplete(2, 3000, "", ""); err != nil {
+		t.Fatalf("MarkChapterComplete: %v", err)
+	}
+	if _, err := s.Progress.StartReworkPass(1, 2, time.Now()); err != nil {
+		t.Fatalf("StartReworkPass: %v", err)
+	}
+	tool := NewSaveFoundationTool(s)
+	args, _ := json.Marshal(map[string]any{
+		"type": "complete_book", "content": map[string]any{},
+		"reason": "测试理由",
+	})
+	if _, err := tool.Execute(context.Background(), args); err == nil {
+		t.Fatal("expected error when rework pass active")
+	}
+	progress, _ := s.Progress.Load()
+	if progress.Phase == domain.PhaseComplete {
+		t.Fatalf("phase should not be Complete during rework pass: %s", progress.Phase)
+	}
+}
+
+// pass 跑完后不得再阻拦完本——守卫不能变成永久门禁。
+func TestSaveFoundationCompleteBookAllowsAfterReworkPassDone(t *testing.T) {
+	s := completeBookSetup(t)
+	if err := s.Progress.MarkChapterComplete(2, 3000, "", ""); err != nil {
+		t.Fatalf("MarkChapterComplete: %v", err)
+	}
+	if _, err := s.Progress.StartReworkPass(1, 2, time.Now()); err != nil {
+		t.Fatalf("StartReworkPass: %v", err)
+	}
+	for ch := 1; ch <= 2; ch++ {
+		if _, err := s.Progress.ApplyReviewOutcome(domain.FlowWriting, nil, "评审通过", ch); err != nil {
+			t.Fatalf("ApplyReviewOutcome(%d): %v", ch, err)
+		}
+	}
+	p, _ := s.Progress.Load()
+	if !p.ReworkPass.Done() {
+		t.Fatalf("pass 应已完成: %+v", p.ReworkPass)
+	}
+	// 走到完本守卫之后：这里只断言"不再被 pass 拦"，其余前置条件交给既有用例。
+	tool := NewSaveFoundationTool(s)
+	args, _ := json.Marshal(map[string]any{
+		"type": "complete_book", "content": map[string]any{},
+		"reason": "测试理由",
+	})
+	_, err := tool.Execute(context.Background(), args)
+	if err != nil && strings.Contains(err.Error(), "返工 pass") {
+		t.Fatalf("pass 已完成，不应再被 pass 守卫阻拦: %v", err)
 	}
 }

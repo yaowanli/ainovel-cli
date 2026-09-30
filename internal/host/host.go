@@ -828,6 +828,103 @@ func (h *Host) SetAdvanceMode(mode domain.ChapterAdvanceMode) error {
 	return nil
 }
 
+// ReworkStatus 返回当前 pass（含已跑完的），无记录时返回 nil。供 /rework status 展示。
+func (h *Host) ReworkStatus() (*domain.ReworkPass, error) {
+	progress, err := h.store.Progress.Load()
+	if err != nil {
+		return nil, err
+	}
+	if progress == nil {
+		return nil, nil
+	}
+	return progress.ReworkPass, nil
+}
+
+// ReworkPlan 是一次 /rework 启动前的可读摘要，供 TUI 二次确认。
+type ReworkPlan struct {
+	StartChapter int
+	EndChapter   int
+	Total        int
+	// RewritableMax 是当前可返工的最大章号（最大已完成章）。
+	RewritableMax int
+}
+
+// ReworkPlanFor 校验范围并返回确认信息。不落盘，调用方确认后再 StartReworkPass。
+func (h *Host) ReworkPlanFor(start, end int) (ReworkPlan, error) {
+	progress, err := h.store.Progress.Load()
+	if err != nil {
+		return ReworkPlan{}, err
+	}
+	if progress == nil {
+		return ReworkPlan{}, fmt.Errorf("progress 未初始化")
+	}
+	if start <= 0 || end < start {
+		return ReworkPlan{}, fmt.Errorf("返工范围非法：%d-%d", start, end)
+	}
+	if progress.ReworkPass.Active() {
+		p := progress.ReworkPass
+		return ReworkPlan{}, fmt.Errorf("已有返工 pass 在跑（第 %d-%d 章，游标 %d），请先 /rework stop",
+			p.StartChapter, p.EndChapter, p.Cursor)
+	}
+	if len(progress.PendingRewrites) > 0 {
+		return ReworkPlan{}, fmt.Errorf("返工队列还有 %d 章（%v）待处理，请先跑空队列", len(progress.PendingRewrites), progress.PendingRewrites)
+	}
+	maxDone := progress.LatestCompleted()
+	if end > maxDone {
+		return ReworkPlan{}, fmt.Errorf("第 %d 章尚未完成，最多可返工到第 %d 章", end, maxDone)
+	}
+	return ReworkPlan{
+		StartChapter:  start,
+		EndChapter:    end,
+		Total:         end - start + 1,
+		RewritableMax: maxDone,
+	}, nil
+}
+
+// StartReworkPass 开启逐章返工。调用前须已用 ReworkPlanFor 向作者确认。
+func (h *Host) StartReworkPass(start, end int) (*domain.ReworkPass, error) {
+	// 与 SetAdvanceMode 一样持 interMu：与运行中/暂停切换互斥，避免与
+	// Engine 正在落盘的评审结果争抢同一把 progress 写锁。
+	h.interMu.Lock()
+	defer h.interMu.Unlock()
+
+	if _, err := h.ReworkPlanFor(start, end); err != nil {
+		return nil, err
+	}
+	progress, err := h.store.Progress.StartReworkPass(start, end, time.Now())
+	if err != nil {
+		return nil, err
+	}
+	verb := "单章"
+	if progress.ReworkPass.Total() > 1 {
+		verb = "逐章"
+	}
+	h.emitEvent(Event{
+		Time: time.Now(), Category: "SYSTEM", Level: "info",
+		Summary: fmt.Sprintf("已开启%s返工：第 %d-%d 章，共 %d 章。每章先经 Editor 评审，确有问题才重写。",
+			verb, start, end, progress.ReworkPass.Total()),
+	})
+	return progress.ReworkPass, nil
+}
+
+// StopReworkPass 中止当前 pass。已进返工队列的章不受影响，仍会跑完。
+func (h *Host) StopReworkPass() (*domain.ReworkPass, error) {
+	h.interMu.Lock()
+	defer h.interMu.Unlock()
+
+	_, stopped, err := h.store.Progress.StopReworkPass()
+	if err != nil {
+		return nil, err
+	}
+	h.emitEvent(Event{
+		Time: time.Now(), Category: "SYSTEM", Level: "info",
+		Summary: fmt.Sprintf("已中止返工 pass（第 %d-%d 章）：已评审 %d 章，返工 %d 章，评审通过 %d 章。%s",
+			stopped.StartChapter, stopped.EndChapter, stopped.Reviewed, len(stopped.Rewritten), stopped.Skipped,
+			"待改章节仍会按队列继续处理。"),
+	})
+	return stopped, nil
+}
+
 // AdvanceOneChapter 在逐章验收模式下授权一个精确章节并启动 Engine。
 func (h *Host) AdvanceOneChapter() error {
 	h.interMu.Lock()

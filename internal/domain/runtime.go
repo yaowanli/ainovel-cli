@@ -66,6 +66,45 @@ type Progress struct {
 	// 去重，字节相同的再完结不会产生新 checkpoint，StopGuard 会把成功的 complete_book
 	// 误判为空转并升级终止。
 	ReopenCount int `json:"reopen_count,omitempty"`
+	// ReworkPass 逐章返工 pass 的进度（/rework）。与 PendingRewrites 正交：
+	// PendingRewrites 是"已判定要改的章"，由 editor 评审写入；ReworkPass 是
+	// "还没评审到的章"，由作者显式发起。二者并存时先跑完队列再评下一章。
+	ReworkPass *ReworkPass `json:"rework_pass,omitempty"`
+}
+
+// ReworkPass 记录一次逐章返工的跨章进度。放 Progress 而非 RunMeta：它与
+// PendingRewrites 同属"写作事实"，必须在同一把写锁下推进。
+//
+// Cursor 是唯一权威进度，语义为"下一个待评审章"，由 save_review 在落盘
+// 评审结果的同一事务内 +1。完成判定即 Cursor > EndChapter，不另设 Done
+// 字段——游标越过终点后 router 分支自然落空，自动恢复续写，同时记录仍
+// 保留给 /rework status 查看。
+type ReworkPass struct {
+	StartChapter int    `json:"start_chapter"`
+	EndChapter   int    `json:"end_chapter"`
+	Cursor       int    `json:"cursor"`
+	Reviewed     int    `json:"reviewed"`             // 已完成评审的章数
+	Rewritten    []int  `json:"rewritten,omitempty"`  // 实际返工过的章
+	Skipped      int    `json:"skipped"`              // 评审通过、未返工的章数
+	StartedAt    string `json:"started_at,omitempty"` // RFC3339
+}
+
+// Active 报告 pass 是否还有待评审的章。游标越过终点即为完成。
+func (r *ReworkPass) Active() bool {
+	return r != nil && r.Cursor <= r.EndChapter
+}
+
+// Total 返回本 pass 覆盖的章数（含首尾）。
+func (r *ReworkPass) Total() int {
+	if r == nil {
+		return 0
+	}
+	return r.EndChapter - r.StartChapter + 1
+}
+
+// Done 返回本 pass 是否已跑完最后一章的评审。
+func (r *ReworkPass) Done() bool {
+	return r != nil && r.Cursor > r.EndChapter
 }
 
 // IsResumable 判断是否可以从断点恢复。

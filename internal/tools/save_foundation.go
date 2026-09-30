@@ -266,6 +266,12 @@ func (t *SaveFoundationTool) Execute(_ context.Context, args json.RawMessage) (j
 		if len(progress.PendingRewrites) > 0 {
 			return nil, fmt.Errorf("还有 %d 章在返工队列中，处理完再调 complete_book: %w", len(progress.PendingRewrites), errs.ErrToolPrecondition)
 		}
+		// 逐章返工 pass 期间同样不许收尾：pass 未跑完说明还有章没被评审过，
+		// 此时完本等于把未检查的内容定稿。与上面的队列守卫并列。
+		if pass := progress.ReworkPass; pass.Active() {
+			return nil, fmt.Errorf("逐章返工 pass 仍在进行（第 %d-%d 章，已评审 %d/%d），跑完再调 complete_book: %w",
+				pass.StartChapter, pass.EndChapter, pass.Reviewed, pass.Total(), errs.ErrToolPrecondition)
+		}
 		// 可枚举的完本前置校验必须在代码层(三分法),不能只依赖提示词里的
 		// "完结判定清单"——真实事故:规划刚落盘 phase 翻到 writing,弱模型顺手
 		// 误调 complete_book,0/68 章被直接标记完本。

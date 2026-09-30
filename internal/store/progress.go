@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"slices"
+	"time"
 
 	"github.com/voocel/ainovel-cli/internal/domain"
 	"github.com/voocel/ainovel-cli/internal/errs"
@@ -362,7 +363,15 @@ func (s *ProgressStore) SetPendingRewrites(chapters []int, reason string) error 
 
 // ApplyReviewOutcome 原子应用审阅产生的流程状态。审阅语义由上层决定；Store 只负责
 // 校验 Flow 迁移和返工章节，并保证 Flow、PendingRewrites、RewriteReason 不出现中间态。
-func (s *ProgressStore) ApplyReviewOutcome(flow domain.FlowState, chapters []int, reason string) (*domain.Progress, error) {
+// ApplyReviewOutcome 原子应用审阅产生的流程状态。审阅语义由上层决定；Store 只负责
+// 落盘。reviewedChapter 是本次评审的章节号（非 arc/global 评审时传入，arc/global
+// 传 0）：逐章返工 pass 的游标在同一事务内推进。
+//
+// 游标必须在同一事务内 +1，不能拆成第二次写。若拆开，pass 评到 verdict=accept
+// 的章时 affected 为空、PendingRewrites 无写入，引擎收不到任何"这章处理完了"
+// 的信号，会重新派发同一章的评审直到 trackDeadlock 熔断。accept 的章不写队列
+// 正是评审后按需返工的常态，所以这条路径必须由游标兜住。
+func (s *ProgressStore) ApplyReviewOutcome(flow domain.FlowState, chapters []int, reason string, reviewedChapter int) (*domain.Progress, error) {
 	var latest *domain.Progress
 	err := s.io.WithWriteLock(func() error {
 		p, err := s.loadUnlocked()
@@ -372,6 +381,7 @@ func (s *ProgressStore) ApplyReviewOutcome(flow domain.FlowState, chapters []int
 		if p == nil {
 			return fmt.Errorf("progress 未初始化: %w", errs.ErrToolPrecondition)
 		}
+		marked := false
 		if len(chapters) > 0 {
 			if flow == domain.FlowWriting {
 				return fmt.Errorf("返工章节非空时 flow 不能为 writing: %w", errs.ErrToolConflict)
@@ -386,11 +396,83 @@ func (s *ProgressStore) ApplyReviewOutcome(flow domain.FlowState, chapters []int
 			p.PendingRewrites = normalized
 			p.RewriteReason = reason
 			p.Flow = flow
+			marked = slices.Contains(normalized, reviewedChapter)
 		} else if len(p.PendingRewrites) == 0 {
 			if err := domain.ValidateFlowTransition(p.Flow, flow); err != nil {
 				return err
 			}
 			p.Flow = flow
+		}
+		advanceReworkPass(p, reviewedChapter, marked)
+		if err := s.saveUnlocked(p); err != nil {
+			return err
+		}
+		latest = p
+		return nil
+	})
+	return latest, err
+}
+
+// advanceReworkPass 在评审落盘的同一事务内推进逐章返工游标。
+// 只认"本次评审章 == 当前游标"这一种情况：常规弧/全局评审（非返工 pass 期间
+// 发生）传不进正数章号；pass 外的评审即使章号相同也不该推动别人的游标。
+func advanceReworkPass(p *domain.Progress, reviewedChapter int, marked bool) {
+	if p.ReworkPass == nil || reviewedChapter <= 0 {
+		return
+	}
+	if p.ReworkPass.Cursor != reviewedChapter {
+		return
+	}
+	p.ReworkPass.Cursor++
+	p.ReworkPass.Reviewed++
+	if marked {
+		p.ReworkPass.Rewritten = append(p.ReworkPass.Rewritten, reviewedChapter)
+		return
+	}
+	p.ReworkPass.Skipped++
+}
+
+// StartReworkPass 开启逐章返工 pass，范围 [start, end]。
+//
+// 四道校验都是为了不把作者带进一个语义错乱的中间态：
+//   - phase 必须是 writing：规划期没有"已写章节"可返工
+//   - 范围必须落在已完成章节内：不能返工尚未写出的章
+//   - 已有 pass 在跑时不许叠加：两个游标会互相推错章号
+//   - PendingRewrites 必须已排空：队列非空时开 pass，游标推进与队列出队
+//     两种进度会交错，无法判断某章处于"已评审待改"还是"改完待确认"
+func (s *ProgressStore) StartReworkPass(start, end int, now time.Time) (*domain.Progress, error) {
+	if start <= 0 || end < start {
+		return nil, fmt.Errorf("返工范围非法：%d-%d，应为正数且首章不大于末章: %w", start, end, errs.ErrToolArgs)
+	}
+	var latest *domain.Progress
+	err := s.io.WithWriteLock(func() error {
+		p, err := s.loadUnlocked()
+		if err != nil {
+			return err
+		}
+		if p == nil {
+			return fmt.Errorf("progress 未初始化: %w", errs.ErrToolPrecondition)
+		}
+		if p.Phase != domain.PhaseWriting {
+			return fmt.Errorf("仅写作阶段可开启逐章返工，当前 phase=%s: %w", p.Phase, errs.ErrToolPrecondition)
+		}
+		if p.ReworkPass.Active() {
+			return fmt.Errorf("已有返工 pass 在跑（第 %d-%d 章，游标 %d），请先 /rework stop: %w",
+				p.ReworkPass.StartChapter, p.ReworkPass.EndChapter, p.ReworkPass.Cursor, errs.ErrToolConflict)
+		}
+		if len(p.PendingRewrites) > 0 {
+			return fmt.Errorf("返工队列还有 %d 章（%v）待处理，请先跑空队列再开启 pass: %w",
+				len(p.PendingRewrites), p.PendingRewrites, errs.ErrToolConflict)
+		}
+		maxDone := p.LatestCompleted()
+		if end > maxDone {
+			return fmt.Errorf("第 %d 章尚未完成，最多可返工到第 %d 章: %w", end, maxDone, errs.ErrToolPrecondition)
+		}
+		p.ReworkPass = &domain.ReworkPass{
+			StartChapter: start,
+			EndChapter:   end,
+			Cursor:       start,
+			StartedAt:    now.Format(time.RFC3339),
 		}
 		if err := s.saveUnlocked(p); err != nil {
 			return err
@@ -399,6 +481,39 @@ func (s *ProgressStore) ApplyReviewOutcome(flow domain.FlowState, chapters []int
 		return nil
 	})
 	return latest, err
+}
+
+// StopReworkPass 中止 pass。游标停在当前章；已进 PendingRewrites 的章不受影响，
+// 仍会按既有队列跑完。停完返回被中止的 pass 供调用方展示。
+func (s *ProgressStore) StopReworkPass() (*domain.Progress, *domain.ReworkPass, error) {
+	var (
+		latest  *domain.Progress
+		stopped *domain.ReworkPass
+	)
+	err := s.io.WithWriteLock(func() error {
+		p, err := s.loadUnlocked()
+		if err != nil {
+			return err
+		}
+		if p == nil {
+			return fmt.Errorf("progress 未初始化: %w", errs.ErrToolPrecondition)
+		}
+		if p.ReworkPass == nil {
+			return fmt.Errorf("当前没有进行中的返工 pass: %w", errs.ErrToolPrecondition)
+		}
+		// 拷一份再置空：调用方要在返回后读范围与计数，直接返回同一指针会被
+		// 后续任何一次 progress 写入就地改掉。
+		snapshot := *p.ReworkPass
+		snapshot.Rewritten = slices.Clone(p.ReworkPass.Rewritten)
+		p.ReworkPass = nil
+		if err := s.saveUnlocked(p); err != nil {
+			return err
+		}
+		latest = p
+		stopped = &snapshot
+		return nil
+	})
+	return latest, stopped, err
 }
 
 // ValidatePendingRewrites 校验章节列表是否可进入返工队列，不修改状态。

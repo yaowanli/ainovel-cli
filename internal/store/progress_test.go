@@ -228,7 +228,7 @@ func TestApplyReviewOutcomePreservesExistingRewriteQueue(t *testing.T) {
 	_ = s.Progress.SetPendingRewrites([]int{1, 2}, "已有返工")
 	_ = s.Progress.SetFlow(domain.FlowRewriting)
 
-	p, err := s.Progress.ApplyReviewOutcome(domain.FlowWriting, nil, "本次审阅通过")
+	p, err := s.Progress.ApplyReviewOutcome(domain.FlowWriting, nil, "本次审阅通过", 0)
 	if err != nil {
 		t.Fatal(err)
 	}

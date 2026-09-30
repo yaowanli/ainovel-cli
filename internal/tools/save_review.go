@@ -131,7 +131,13 @@ func (t *SaveReviewTool) Execute(_ context.Context, args json.RawMessage) (json.
 
 	// 先原子应用控制状态，再保存审阅工件。若第二步失败，返工意图仍然存在；
 	// Writer 排空队列后，路由会因审阅工件缺失而重新派发 Editor，不会跳过审阅。
-	latest, err := t.store.Progress.ApplyReviewOutcome(reviewOutcome, affected, r.Summary)
+	// reviewedChapter 只在 scope=chapter 时传入：逐章返工 pass 的游标靠它推进，
+	// 弧/全局评审不推进（它们覆盖多章，没有单一"当前章"）。
+	reviewedChapter := 0
+	if r.Scope == "chapter" {
+		reviewedChapter = r.Chapter
+	}
+	latest, err := t.store.Progress.ApplyReviewOutcome(reviewOutcome, affected, r.Summary, reviewedChapter)
 	if err != nil {
 		return nil, fmt.Errorf("apply review outcome: %w", err)
 	}

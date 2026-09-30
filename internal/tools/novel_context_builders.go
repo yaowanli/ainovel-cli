@@ -3,6 +3,8 @@ package tools
 import (
 	"fmt"
 	"slices"
+	"strconv"
+	"strings"
 
 	"github.com/voocel/ainovel-cli/internal/domain"
 	"github.com/voocel/ainovel-cli/internal/rules"
@@ -540,6 +542,70 @@ func (t *ContextTool) buildChapterWorkingMemory(envelope *chapterContextEnvelope
 		} else {
 			reads.require("previous_chapter", err)
 		}
+	}
+
+	t.buildForwardContinuity(&state, envelope)
+}
+
+// buildForwardContinuity 在逐章返工 pass 期间，为目标章列出后续已定稿章节。
+//
+// previous_tail 与 related_chapters 都是向后看的，返工第 N 章时模型看不到
+// 第 N+1 章依赖了什么——逐章重写因此会静默破坏后文呼应，且没有任何报错。
+// 这里补上缺口：取 N+1、N+2 的标题与实际摘要（各截 300 字，合计约 600 字，
+// 成本可忽略），并明确它们不可修改。
+//
+// 取两章而非一章：第 N+3 章及之后的依赖基本经由 N+1/N+2 的摘要间接体现，
+// 继续往后取会线性膨胀上下文而无新增信息。
+func (t *ContextTool) buildForwardContinuity(state *contextBuildState, envelope *chapterContextEnvelope) {
+	// state.progress 可能为 nil（核心状态损坏时只带 warning 继续），必须先判空：
+	// 直接取 state.progress.ReworkPass 会解引用 nil 指针。
+	if state == nil || state.progress == nil {
+		return
+	}
+	pass := state.progress.ReworkPass
+	if !pass.Active() {
+		return
+	}
+	// 只有正在被返工的章需要前向约束。writer 返工目标是 PendingRewrites[0]，
+	// editor 评审目标是 Cursor；两者都 ≤ EndChapter，由 pass 范围兜住。
+	target := state.chapter
+	if target < pass.StartChapter || target > pass.EndChapter {
+		return
+	}
+	const perChapterRunes = 300
+	var (
+		entries []string
+		labels  []string
+	)
+	for _, next := range []int{target + 1, target + 2} {
+		sum, err := t.store.Summaries.LoadSummary(next)
+		if err != nil || sum == nil {
+			continue
+		}
+		summary := []rune(strings.TrimSpace(sum.Summary))
+		if len(summary) > perChapterRunes {
+			summary = summary[:perChapterRunes]
+		}
+		if len(summary) == 0 {
+			continue
+		}
+		title := sum.Title
+		if title == "" {
+			title = "（无题）"
+		}
+		labels = append(labels, strconv.Itoa(next))
+		entries = append(entries, fmt.Sprintf("第 %d 章《%s》实际写到：%s", next, title, string(summary)))
+	}
+	if len(entries) == 0 {
+		return
+	}
+	envelope.Working["forward_continuity"] = map[string]any{
+		"locked_chapters": labels,
+		"note": fmt.Sprintf("第 %s 章已定稿且不可修改。改写第 %d 章时不得与其冲突："+
+			"后文已依赖的内容（伏笔、称呼、既成事实、人物状态）必须保留；"+
+			"若发现第 %d 章与前文冲突，在 issues 中报告而不要在改写中强行修正。",
+			strings.Join(labels, "、"), target, target+1),
+		"chapters": entries,
 	}
 }
 
