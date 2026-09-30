@@ -15,6 +15,15 @@
 | 控制面是显式方法 | `StartPrepared` / `Resume` / `Steer` / `Continue` / `SetAdvanceMode` / `AdvanceOneChapter` / `Abort` / `Snapshot` | REST 端点一一对应，无需解析 TUI 事件反推意图 |
 | 事件面是 channel | `Events()` / `Stream()` / `Done()` | 直接转成 SSE；`Event.ID` + `Running()` 天然支持"同一调用原地更新" |
 
+### 项目 ≠ workspace 子目录
+
+上游的"一本书"是 **`{cwd}/output/novel`**，不是某个固定根目录下的子目录。用 TUI
+在任意目录起书时，那本书的项目目录就是那个 cwd。因此服务端不假定"项目 = workspace
+子目录"，而是 `workspace 子目录 ∪ 挂载项`：挂载表落在
+`workspace/.ainovel-server.json`（点目录，不会被当成项目扫描），重启后仍生效。
+`POST /api/projects/mount` 会自动识别 `<dir>/output/novel` 与"dir 本身即 store 根"
+两种布局。
+
 `internal/host/book_lock.go` 用 `flock` 对小说目录加跨进程独占锁——**同一目录
 不可能被两个实例同时打开**（TUI 开着的时候服务端会拿到 `ErrBookInUse`，这正是
 期望行为），不同目录则完全隔离。
@@ -58,7 +67,9 @@ go build -o ../bin/ainovel-server ./cmd/ainovel-server
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | GET | `/api/health` | 存活与统计 |
-| GET | `/api/projects` | 项目列表（附状态快照） |
+| GET | `/api/projects` | 项目列表（附状态快照）= workspace 子目录 ∪ 挂载项 |
+| POST | `/api/projects/mount` | 挂载已有书：`{id?, dir}`。`dir` 可为 TUI 工作目录（含 `output/novel`）或 store 根。不移动数据 |
+| DELETE | `/api/projects/{id}/mount` | 取消挂载（不动磁盘） |
 | POST | `/api/projects` | 新建项目：`{id?, prompt?, style?, model?, provider?, reasoning_effort?}`。`prompt` 非空则立即开写 |
 | GET | `/api/projects/{id}` | 单项目状态快照 |
 | POST | `/api/projects/{id}/start` | `{prompt}` 开新书并启动 |
