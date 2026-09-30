@@ -34,6 +34,16 @@ import (
 	"github.com/voocel/ainovel-cli/internal/rules"
 )
 
+// 由 ldflags 注入（见 .goreleaser.yml），与 cmd/ainovel-cli 保持同一套变量名。
+var (
+	version = "dev"
+	commit  = "unknown"
+	date    = "unknown"
+)
+
+// versionInfo 返回可展示的版本三元组。
+func versionInfo() [3]string { return [3]string{version, commit, date} }
+
 func main() {
 	var (
 		addr      = flag.String("addr", "127.0.0.1:8787", "HTTP 监听地址")
@@ -42,8 +52,14 @@ func main() {
 		origins   = flag.String("origin", "", "允许跨域访问的来源，逗号分隔（默认只允许同源；跨域必须显式列出具体 origin，不支持 *）")
 		token     = flag.String("token", "", "启用后所有 /api 请求需带 Authorization: Bearer <token>")
 		verbose   = flag.Bool("v", false, "输出调试日志")
+		showVer   = flag.Bool("version", false, "打印版本后退出")
 	)
 	flag.Parse()
+	if *showVer {
+		v := versionInfo()
+		fmt.Printf("ainovel-server %s\ncommit: %s\nbuilt: %s\n", v[0], v[1], v[2])
+		return
+	}
 
 	level := slog.LevelInfo
 	if *verbose {

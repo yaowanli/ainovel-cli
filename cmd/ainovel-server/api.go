@@ -23,8 +23,11 @@ func (r *Registry) Handler(allow map[string]bool, token string) http.Handler {
 	}
 
 	mux.HandleFunc("GET /api/health", func(w http.ResponseWriter, req *http.Request) {
+		v := versionInfo()
 		writeJSON(w, http.StatusOK, map[string]any{
 			"ok":        true,
+			"version":   v[0],
+			"commit":    v[1],
 			"workspace": r.Workspace(),
 			"projects":  len(r.list()),
 			"watchers":  r.hub.Count(),

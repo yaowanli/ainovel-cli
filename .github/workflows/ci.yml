@@ -48,4 +48,6 @@ jobs:
         if: runner.os == 'Linux'
         env:
           GOWORK: "off"
-        run: go test -race -buildvcs=false -count=1 ./internal/host ./internal/store ./internal/tools
+        # cmd/ainovel-server 是并发最重的一处：N 个 Host 共享一个进程，
+        # 读路径与控制面锁分离、占用探测的缓存与单飞都在这里。
+        run: go test -race -buildvcs=false -count=1 ./internal/host ./internal/store ./internal/tools ./cmd/ainovel-server

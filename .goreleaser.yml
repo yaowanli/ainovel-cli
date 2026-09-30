@@ -26,6 +26,24 @@ builds:
       - amd64
       - arm64
 
+  - id: ainovel-server
+    main: ./cmd/ainovel-server
+    binary: ainovel-server
+    env:
+      - CGO_ENABLED=0
+    ldflags:
+      - -s -w
+      - -X main.version={{.Version}}
+      - -X main.commit={{.Commit}}
+      - -X main.date={{.CommitDate}}
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+
 archives:
   - id: ainovel-cli-archive
     ids:
@@ -41,6 +59,26 @@ archives:
       - LICENSE
     name_template: >-
       {{ .ProjectName }}_{{ .Version }}_
+      {{- title .Os }}_
+      {{- if eq .Arch "amd64" }}x86_64
+      {{- else }}{{ .Arch }}{{ end }}
+
+  - id: ainovel-server-archive
+    ids:
+      - ainovel-server
+    formats:
+      - tar.gz
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+    files:
+      - README.md
+      - LICENSE
+      # 服务端的配置/挂载/排错说明随包发布。
+      - cmd/ainovel-server/README.md
+    name_template: >-
+      {{ .ProjectName }}_server_{{ .Version }}_
       {{- title .Os }}_
       {{- if eq .Arch "amd64" }}x86_64
       {{- else }}{{ .Arch }}{{ end }}
@@ -72,5 +110,6 @@ changelog:
 
 release:
   github:
-    owner: voocel
+    # 不写死 owner：留空时 GoReleaser 从 git remote 推断发布目标。
+    # 在 fork 里发布才不会误指向上游 voocel/ainovel-cli（那会因无权限而失败）。
     name: ainovel-cli
