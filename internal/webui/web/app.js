@@ -55,6 +55,8 @@ function isLocked(p) { return !!p && p.state === 'locked'; }
 
 // 占用期间禁用全部控制按钮：服务端本来就驱动不了这本书（上游跨进程 flock），
 // 与其让用户点下去吃一个 409，不如直接置灰并说明原因。
+// 只有"控制"按钮受占用门禁约束。读章节、刷新列表是纯读，必须永远可用——
+// 上游独占锁只挡驱动，不挡读。
 const CONTROLS = ['#b-resume', '#b-abort', '#b-review', '#b-auto', '#b-next', '#b-steer', '#b-continue'];
 
 function renderLockBanner() {
@@ -332,13 +334,17 @@ $('#b-continue').onclick = act(async (id) => {
   await api(`/api/projects/${id}/continue`, { text });
   $('#steer').value = '';
 });
-$('#b-chapter').onclick = act(async (id) => {
-  const p = state.projects.get(id);
-  const n = (p && p.completed) || 0;
-  if (!n) { toast('还没有已完成章节'); return; }
-  const r = await api(`/api/projects/${id}/chapters/${n}`);
-  showChapter(r.chapter, r.content);
-});
+// 读章节不受占用门禁约束：书被 TUI 占着时正文照样读得到。
+$('#b-chapter').onclick = async () => {
+  if (!state.selected) { toast('先选一个项目'); return; }
+  try {
+    const p = state.projects.get(state.selected);
+    const n = (p && p.completed) || 0;
+    if (!n) { toast('还没有已完成章节'); return; }
+    const r = await api(`/api/projects/${state.selected}/chapters/${n}`);
+    showChapter(r.chapter, r.content);
+  } catch (e) { toast(e.message); }
+};
 
 $('#steer').addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); $('#b-steer').click(); }

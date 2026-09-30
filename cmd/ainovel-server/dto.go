@@ -9,24 +9,24 @@ import (
 
 // SnapshotDTO 是项目在总览列表与详情页共用的状态投影。
 type SnapshotDTO struct {
-	ID              string         `json:"id"`
-	Dir             string         `json:"dir"`
-	OutputDir       string         `json:"output_dir"`
-	State           string         `json:"state"`
-	Title           string         `json:"title"`
-	Synopsis        string         `json:"synopsis"`
-	Phase           string         `json:"phase"`
-	Flow            string         `json:"flow"`
-	Completed       int            `json:"completed"`
-	TotalChapters   int            `json:"total_chapters"`
-	InProgress      int            `json:"in_progress"`
-	PendingRewrites []int          `json:"pending_rewrites"`
-	AdvanceMode     string         `json:"advance_mode"`
-	CostUSD         float64        `json:"cost_usd"`
-	Opened          time.Time      `json:"opened,omitzero"`
-	Error           string         `json:"error,omitempty"`
+	ID              string    `json:"id"`
+	Dir             string    `json:"dir"`
+	OutputDir       string    `json:"output_dir"`
+	State           string    `json:"state"`
+	Title           string    `json:"title"`
+	Synopsis        string    `json:"synopsis"`
+	Phase           string    `json:"phase"`
+	Flow            string    `json:"flow"`
+	Completed       int       `json:"completed"`
+	TotalChapters   int       `json:"total_chapters"`
+	InProgress      int       `json:"in_progress"`
+	PendingRewrites []int     `json:"pending_rewrites"`
+	AdvanceMode     string    `json:"advance_mode"`
+	CostUSD         float64   `json:"cost_usd"`
+	Opened          time.Time `json:"opened,omitzero"`
+	Error           string    `json:"error,omitempty"`
 	// Holder 仅在 state=locked 时有值：占用这本书的外部进程身份。
-	Holder   *holder         `json:"holder,omitempty"`
+	Holder   *holder        `json:"holder,omitempty"`
 	Snapshot *UISnapshotDTO `json:"live,omitempty"`
 }
 

@@ -431,7 +431,16 @@ type Project struct {
 	storeDir string // 显式 store 目录；空 = <Dir>/output/novel
 	base     string // 共享配置基底目录
 
-	mu      sync.Mutex // 串行化控制面调用（start/steer/next/abort/model 切换）
+	// 三把锁，职责不重叠：
+	//   ctrlMu —— 只串行化控制面调用（start/steer/next/abort/model）。它会**跨 LLM 调用**
+	//             持有（Arbiter 裁定、启动裁定、规则归一化，最长可达分钟级），所以任何
+	//             读路径都绝不能碰它，否则一次干预就把整个列表页冻住。
+	//   hostMu —— 只保护 host 指针的替换（open/close），持锁时间以微秒计。
+	//   stateMu —— 保护 state / lastErr / opened 与占用探测缓存。
+	ctrlMu  sync.Mutex
+	hostMu  sync.RWMutex
+	stateMu sync.Mutex
+
 	host    *host.Host
 	cfg     bootstrap.Config
 	hub     *Hub
@@ -440,6 +449,13 @@ type Project struct {
 	lastErr string
 	opened  time.Time
 	pumped  bool
+
+	// 占用探测缓存：lsof+ps 是两个子进程，挂在快照路径上不能每次都跑。
+	holderLock   sync.Mutex
+	holderCached bool
+	holderLocked bool // 缓存的是"是否被占"这个布尔量，而不只是 holder 身份
+	holderAt     time.Time
+	holderValue  holder
 }
 
 func NewProject(id, dir, base, storeDir string) *Project {
@@ -464,13 +480,13 @@ func (p *Project) OutputDir() string {
 // 后开的书会把先开的书的日志抢走，且 Close 时恢复的是过期 logger。每本的可观测性
 // 由事件流（→ SSE）与 store 落盘承担。
 func (p *Project) open() error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
+	p.ctrlMu.Lock()
+	defer p.ctrlMu.Unlock()
 	return p.openLocked()
 }
 
 func (p *Project) openLocked() error {
-	if p.host != nil {
+	if p.current() != nil {
 		return nil
 	}
 	cfg, err := bootstrap.LoadConfigForLayers(p.base, p.Dir)
@@ -491,12 +507,18 @@ func (p *Project) openLocked() error {
 	}
 	h, err := host.New(cfg, bundle, host.WithUserRulesOptions(ruleOpts))
 	if err != nil {
+		p.stateMu.Lock()
 		p.lastErr = err.Error()
+		p.stateMu.Unlock()
 		return err
 	}
+	p.hostMu.Lock()
 	p.host = h
+	p.hostMu.Unlock()
 	p.cfg = cfg
+	p.stateMu.Lock()
 	p.opened = time.Now()
+	p.stateMu.Unlock()
 	if !p.pumped {
 		p.pumped = true
 		go p.pump(h)
@@ -507,15 +529,28 @@ func (p *Project) openLocked() error {
 	return nil
 }
 
+// current 返回当前 Host 指针（可能为 nil）。
+func (p *Project) current() *host.Host {
+	p.hostMu.RLock()
+	defer p.hostMu.RUnlock()
+	return p.host
+}
+
 func (p *Project) Close() {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.host == nil {
+	p.ctrlMu.Lock()
+	defer p.ctrlMu.Unlock()
+	h := p.current()
+	if h == nil {
 		return
 	}
-	p.host.Close()
+	p.hostMu.Lock()
 	p.host = nil
+	p.hostMu.Unlock()
+	h.Close()
+	p.stateMu.Lock()
 	p.state = stateClosed
+	p.stateMu.Unlock()
+	p.invalidateHolder()
 	p.publishState()
 }
 
@@ -527,12 +562,12 @@ func (p *Project) withHost(fn func(h *host.Host) error) error {
 
 // withHostValue 同 withHost，但允许 fn 返回业务结果。
 func (p *Project) withHostValue(fn func(h *host.Host) (any, error)) (any, error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
+	p.ctrlMu.Lock()
+	defer p.ctrlMu.Unlock()
 	if err := p.openLocked(); err != nil {
 		return nil, err
 	}
-	return fn(p.host)
+	return fn(p.current())
 }
 
 // pump 是本项目唯一的事件消费者：Host 的 Events/Stream 通道是"丢最旧"语义，
@@ -568,46 +603,49 @@ func (p *Project) pump(h *host.Host) {
 }
 
 func (p *Project) markRunEnded() {
-	p.mu.Lock()
-	defer p.mu.Unlock()
+	p.stateMu.Lock()
 	if p.state == stateRunning {
 		p.state = stateDone
 	}
+	p.stateMu.Unlock()
 	p.publishState()
 }
 
 func (p *Project) setErr(err error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
+	p.stateMu.Lock()
 	if err != nil {
 		p.lastErr = err.Error()
 		p.hub.Publish(Message{Type: "error", Data: map[string]string{"error": p.lastErr}})
 		if p.global != nil {
 			p.global.Publish(Message{Type: "error", Data: map[string]string{"error": p.lastErr}})
 		}
+		p.stateMu.Unlock()
 		return
 	}
 	p.lastErr = ""
+	p.stateMu.Unlock()
 }
 
-// publishState 在持锁状态下广播最新快照，供 SSE 客户端刷新总览。
+// publishState 广播最新快照，供 SSE 客户端刷新总览。
 func (p *Project) publishState() {
-	snap := p.snapshotLocked()
+	snap := p.Snapshot()
 	p.hub.Publish(Message{Type: "snapshot", Data: snap})
 	if p.global != nil {
 		p.global.Publish(Message{Type: "snapshot", Data: snap})
 	}
 }
 
-// snapshotLocked 汇总项目状态。host 未打开时只读 store 里的静态事实（离线可用）。
-func (p *Project) snapshotLocked() SnapshotDTO {
+// Snapshot 汇总项目状态。它是**读路径**，只短暂持有 stateMu / hostMu，绝不触碰
+// ctrlMu——否则一次正在进行的 LLM 裁定会把所有快照请求（包括列表页与 SSE 首帧）
+// 一起堵住。host 未打开时只读 store 里的静态事实，所以离线也能出快照。
+func (p *Project) Snapshot() SnapshotDTO {
+	p.stateMu.Lock()
+	state, lastErr, opened := p.state, p.lastErr, p.opened
+	p.stateMu.Unlock()
+
 	dto := SnapshotDTO{
-		ID:        p.ID,
-		Dir:       p.Dir,
-		OutputDir: p.OutputDir(),
-		State:     string(p.state),
-		Opened:    p.opened,
-		Error:     p.lastErr,
+		ID: p.ID, Dir: p.Dir, OutputDir: p.OutputDir(),
+		State: string(state), Opened: opened, Error: lastErr,
 	}
 
 	st := storepkg.NewStore(p.OutputDir())
@@ -626,16 +664,24 @@ func (p *Project) snapshotLocked() SnapshotDTO {
 		dto.AdvanceMode = string(meta.AdvanceMode)
 	}
 
-	if p.host == nil {
-		// 区分"没人管"与"被别的进程管着"：前者可以随时打开，后者是上游独占锁的保护。
-		if locked, h := dirLocked(dto.OutputDir); locked {
+	h := p.current()
+	if h == nil {
+		// 区分"没人管"与"被别的进程管着"。探测在锁外做，且带 TTL 缓存——
+		// lsof + ps 是两个子进程，不能挂在每 5 秒一次的快照路径上。
+		if locked, who := p.holderOf(dto.OutputDir); locked {
 			dto.State = string(stateLocked)
-			dto.Holder = &h
+			dto.Holder = &who
 		}
 		return dto
 	}
 
-	ui := p.host.Snapshot()
+	ui := h.Snapshot()
+	p.fillLive(&dto, ui)
+	return dto
+}
+
+// fillLive 把 host.UISnapshot 合并进 dto。
+func (p *Project) fillLive(dto *SnapshotDTO, ui host.UISnapshot) {
 	dto.Snapshot = &UISnapshotDTO{
 		Title:              ui.BookTitle,
 		Synopsis:           ui.Synopsis,
@@ -694,17 +740,45 @@ func (p *Project) snapshotLocked() SnapshotDTO {
 	}
 	dto.CostUSD = ui.TotalCostUSD
 	dto.TotalChapters = ui.TotalChapters
-	return dto
 }
 
-// Snapshot 返回项目状态快照。
-func (p *Project) Snapshot() SnapshotDTO {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.snapshotLocked()
+// holderTTL 是占用探测的缓存窗口：足够让列表刷新看起来实时，又不至于每秒
+// fork 两个子进程。
+const holderTTL = 3 * time.Second
+
+// holderOf 返回带 TTL 缓存的占用探测结果。
+func (p *Project) holderOf(outputDir string) (bool, holder) {
+	p.holderLock.Lock()
+	if p.holderCached && time.Since(p.holderAt) < holderTTL {
+		locked, who := p.holderLocked, p.holderValue
+		p.holderLock.Unlock()
+		return locked, who
+	}
+	p.holderLock.Unlock()
+
+	locked, who := dirLocked(outputDir)
+
+	p.holderLock.Lock()
+	p.holderCached, p.holderLocked = true, locked
+	p.holderAt, p.holderValue = time.Now(), who
+	p.holderLock.Unlock()
+	return locked, who
+}
+
+// invalidateHolder 让缓存立即失效（Host 打开/关闭后占用状态必然变了）。
+func (p *Project) invalidateHolder() {
+	p.holderLock.Lock()
+	p.holderCached, p.holderLocked, p.holderAt = false, false, time.Time{}
+	p.holderLock.Unlock()
 }
 
 // ── 控制面操作 ──
+
+func (p *Project) setState(s runState) {
+	p.stateMu.Lock()
+	p.state = s
+	p.stateMu.Unlock()
+}
 
 // Start 以一句话需求开新书并立即启动 Engine。
 func (p *Project) Start(prompt string) error {
@@ -719,7 +793,7 @@ func (p *Project) Start(prompt string) error {
 		if err := h.StartPrepared(prompt); err != nil {
 			return err
 		}
-		p.state = stateRunning
+		p.setState(stateRunning)
 		p.publishState()
 		return nil
 	})
@@ -735,7 +809,7 @@ func (p *Project) Resume() error {
 		if label == "" {
 			return errors.New("没有可恢复的会话")
 		}
-		p.state = stateRunning
+		p.setState(stateRunning)
 		p.publishState()
 		return nil
 	})
@@ -751,7 +825,7 @@ func (p *Project) Steer(text string) error {
 		if err := h.Steer(text); err != nil {
 			return err
 		}
-		p.state = stateRunning
+		p.setState(stateRunning)
 		p.publishState()
 		return nil
 	})
@@ -767,7 +841,7 @@ func (p *Project) Continue(text string) error {
 		if err := h.Continue(text); err != nil {
 			return err
 		}
-		p.state = stateRunning
+		p.setState(stateRunning)
 		p.publishState()
 		return nil
 	})
@@ -779,7 +853,7 @@ func (p *Project) Abort() error {
 		if !h.Abort() {
 			return errors.New("当前没有正在运行的创作")
 		}
-		p.state = statePaused
+		p.setState(statePaused)
 		p.publishState()
 		return nil
 	})
@@ -800,7 +874,7 @@ func (p *Project) Next() error {
 		if err := h.AdvanceOneChapter(); err != nil {
 			return err
 		}
-		p.state = stateRunning
+		p.setState(stateRunning)
 		p.publishState()
 		return nil
 	})
