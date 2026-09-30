@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/voocel/ainovel-cli/internal/tools"
@@ -137,6 +138,24 @@ func readOverride(dir, name string) string {
 // styleNameRe 校验用户自定义 style 文件名(不含扩展名),拒绝路径字符。
 var styleNameRe = regexp.MustCompile(`^[a-z0-9-]+$`)
 
+// listGenres 列出内置题材包名，供未知题材告警给出可选项。
+// 用户自定义 style 目录（HomeStyleDir/BookStyleDir）也能加题材包，
+// 所以内置列表只是"至少还有这些"，不是全集。
+func listGenres() []string {
+	entries, err := referencesFS.ReadDir("references/genres")
+	if err != nil {
+		return nil
+	}
+	out := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if e.IsDir() {
+			out = append(out, e.Name())
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
 func loadReferences(style string, opts LoadOptions) tools.References {
 	if style == "" {
 		style = "default"
@@ -157,11 +176,26 @@ func loadReferences(style string, opts LoadOptions) tools.References {
 	}
 	if style != "" && style != "default" {
 		genreDir := "references/genres/" + style + "/"
-		if data, err := referencesFS.ReadFile(genreDir + "style-references.md"); err == nil {
-			refs.StyleReference = string(data)
+		styleRef, styleErr := referencesFS.ReadFile(genreDir + "style-references.md")
+		arcTpl, arcErr := referencesFS.ReadFile(genreDir + "arc-templates.md")
+		if styleErr != nil || arcErr != nil {
+			// 题材包缺失时静默回落是有害的：本书拿不到任何题材模板，作者却毫无
+			// 提示，只会以为"系统对历史题材支持不好"。写历史照着通用提示词硬写，
+			// 翻车点在称谓、度量衡、器物年代——这些通用判据一条都覆盖不到。
+			// 缺省回退的代价是静默的错误方向，所以必须显式告警并列出可用题材。
+			available := listGenres()
+			if len(available) == 0 {
+				slog.Warn("未知题材且无内置题材包", "module", "assets", "style", style)
+			} else {
+				slog.Warn("未知题材，将回退到通用参考（本书不会有题材专属模板）",
+					"module", "assets", "style", style, "available_genres", strings.Join(available, ", "))
+			}
 		}
-		if data, err := referencesFS.ReadFile(genreDir + "arc-templates.md"); err == nil {
-			refs.ArcTemplates = string(data)
+		if styleErr == nil {
+			refs.StyleReference = string(styleRef)
+		}
+		if arcErr == nil {
+			refs.ArcTemplates = string(arcTpl)
 		}
 		// 题材风格参考:同名整文件替换(本书 > 全局);自定义 style 无内置参考时
 		// 允许仅由覆盖提供,不回退 default(错误的参照比没有更糟)。
