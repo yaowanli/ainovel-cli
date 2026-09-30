@@ -11,12 +11,27 @@
     --warn: #fbbf24; --err: #f87171; --run: #a78bfa;
   }
   * { box-sizing: border-box; }
+  /* 滚动条：系统默认的浅色滚动条压在暗色面板上非常刺眼，而且占用可观宽度。
+     统一换成细、暗色、悬停提亮的样式；::-webkit-* 覆盖 Chrome/Safari/Edge，
+     scrollbar-width/color 是 Firefox 的等价物。 */
+  * { scrollbar-width: thin; scrollbar-color: #39404f transparent; }
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-track, ::-webkit-scrollbar-corner { background: transparent; }
+  ::-webkit-scrollbar-thumb {
+    background: #39404f; border-radius: 5px;
+    border: 2px solid transparent; background-clip: content-box;
+  }
+  ::-webkit-scrollbar-thumb:hover { background: #5b657d; background-clip: content-box; }
+  ::-webkit-scrollbar-thumb:active { background: var(--accent); background-clip: content-box; }
   body {
     margin: 0; background: var(--bg); color: var(--fg); height: 100vh; overflow: hidden;
     font: 13px/1.55 -apple-system, "PingFang SC", "Helvetica Neue", "Microsoft YaHei", sans-serif;
   }
-  #app { display: grid; grid-template-columns: 290px 1fr 1fr; height: 100vh; }
-  .col { display: flex; flex-direction: column; min-width: 0; border-right: 1px solid var(--line); }
+  /* 显式给出行轨道，且 min 用 0：单条隐式 auto 行会按最高列的 max-content 定高，
+     一整章正文（约 6000px）会把行撑破 100vh，body 的 overflow:hidden 又不让页面滚，
+     于是章节下半截直接被裁掉、#out 自身也没有可滚高度。 */
+  #app { display: grid; grid-template-columns: 290px 1fr 1fr; grid-template-rows: minmax(0, 1fr); height: 100vh; height: 100dvh; }
+  .col { display: flex; flex-direction: column; min-width: 0; min-height: 0; border-right: 1px solid var(--line); }
   .col:last-child { border-right: none; }
   header {
     padding: 10px 12px; border-bottom: 1px solid var(--line); background: var(--panel);
@@ -24,7 +39,8 @@
   }
   h1 { font-size: 13px; margin: 0; font-weight: 600; letter-spacing: .3px; }
   .grow { flex: 1; }
-  .body { flex: 1; overflow: auto; padding: 8px; }
+  /* min-height:0 让这一格可以收缩到视口高度，overflow 才有滚动的前提 */
+  .body { flex: 1; min-height: 0; overflow: auto; padding: 8px; }
   .card {
     background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
     padding: 10px; margin-bottom: 8px; cursor: pointer;
