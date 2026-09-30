@@ -5,6 +5,9 @@ on:
   push:
     branches:
       - main
+  # 允许手动重跑：fork 里 Actions 偶尔不会为首次推送排队（上游仓库没有这个触发器，
+  # 加它不影响上游行为——上游不会用到 dispatch）。
+  workflow_dispatch:
 
 permissions:
   contents: read
