@@ -82,7 +82,9 @@ function stateLabel(p) {
   if (p.state === 'done') return p.phase === 'complete' ? '完本' : '已停';
   if (p.state === 'paused') return '暂停';
   if (p.state === 'idle') return '待命';
-  return '离线';
+  // locked = 同一本书正被另一个进程（多半是 TUI）驱动：数据照常显示，但服务端不能接管。
+  if (p.state === 'locked') return '被其他进程占用';
+  return '未在服务端打开';
 }
 
 function renderStat() {

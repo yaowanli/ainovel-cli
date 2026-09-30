@@ -11,6 +11,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gofrs/flock"
+
 	"github.com/voocel/ainovel-cli/assets"
 	"github.com/voocel/ainovel-cli/internal/bootstrap"
 	"github.com/voocel/ainovel-cli/internal/domain"
@@ -326,7 +328,28 @@ const (
 	stateRunning runState = "running" // 引擎运行中
 	statePaused  runState = "paused"  // 运行过，当前停机等待继续
 	stateDone    runState = "done"    // 本轮已结束（完本或停止）
+	// stateLocked 表示 store 目录被**另一个进程**占用（通常是同一本书还开着 TUI）。
+	// 这不是错误状态：服务端读得到磁盘事实，只是不能驱动它——上游对小说目录持有
+	// 跨进程 flock 独占锁（internal/host/book_lock.go），两个实例同时驱动同一本书会
+	// 互相覆盖 checkpoint。
+	stateLocked runState = "locked"
 )
+
+// dirLocked 探测 store 目录是否被其他进程持锁。探测用 flock 自身的零成本语义：
+// TryLock 成功后立刻释放，不影响真正要打开它的那个进程。
+func dirLocked(outputDir string) bool {
+	lock := flock.New(filepath.Join(outputDir, ".ainovel.lock"), flock.SetPermissions(0o600))
+	ok, err := lock.TryLock()
+	if err != nil {
+		return false
+	}
+	if !ok {
+		_ = lock.Close()
+		return true
+	}
+	_ = lock.Close()
+	return false
+}
 
 // Project 是"一本小说"的服务端封装：目录 + 配置 + 可选的 host.Host + 事件总线。
 type Project struct {
@@ -556,6 +579,10 @@ func (p *Project) snapshotLocked() SnapshotDTO {
 	}
 
 	if p.host == nil {
+		// 区分"没人管"与"被别的进程管着"：前者可以随时打开，后者是上游独占锁的保护。
+		if dirLocked(dto.OutputDir) {
+			dto.State = string(stateLocked)
+		}
 		return dto
 	}
 
