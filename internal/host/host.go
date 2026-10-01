@@ -851,6 +851,43 @@ func (h *Host) UserRulesSnapshot() (*rules.Snapshot, error) {
 	return h.userRules.GetOrBuild(h.runCtx)
 }
 
+// GenerateEraProposals 为指定朝代生成时代术语候选表，落盘为 pending。
+// 不触碰 user_rules——候选须经 /rules adopt 逐条采纳后才生效。
+func (h *Host) GenerateEraProposals(era string) (*storepkg.EraProposalDoc, error) {
+	doc, err := userrules.NewEraGenerator(h.models.Default).Generate(h.runCtx, era)
+	if err != nil {
+		return nil, err
+	}
+	if err := h.store.EraProposals.Save(doc); err != nil {
+		return nil, err
+	}
+	return doc, nil
+}
+
+// EraProposals 返回当前候选表（可能为 nil，表示尚未生成）。
+func (h *Host) EraProposals() (*storepkg.EraProposalDoc, error) {
+	return h.store.EraProposals.Load()
+}
+
+// PendingEraProposals 返回待裁决候选，low 把握排在前面。
+func (h *Host) PendingEraProposals() ([]storepkg.EraProposal, error) {
+	doc, err := h.store.EraProposals.Load()
+	if err != nil {
+		return nil, err
+	}
+	return userrules.PendingProposals(doc), nil
+}
+
+// AdoptEraProposal 把一条候选写入生效规则。
+func (h *Host) AdoptEraProposal(banned string) (rules.TermCorrection, error) {
+	return userrules.AdoptProposal(h.store, banned)
+}
+
+// RejectEraProposal 否决一条候选。
+func (h *Host) RejectEraProposal(banned string) error {
+	return userrules.RejectProposal(h.store, banned)
+}
+
 // ReworkPlan 是一次 /rework 启动前的可读摘要，供 TUI 二次确认。
 type ReworkPlan struct {
 	StartChapter int

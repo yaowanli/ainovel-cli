@@ -83,7 +83,7 @@ func TestIsEmptyWithTermCorrectionsOnly(t *testing.T) {
 // 对照表是逐次累积的（今天加"沈相公"，明天加"相公"），整表覆盖会抹掉旧条目。
 func TestMergeTermCorrectionsAccumulates(t *testing.T) {
 	dst := []TermCorrection{{Banned: "沈相公", Use: []string{"郎君"}, Note: "第一版"}}
-	got := mergeTermCorrections(dst, []TermCorrection{{Banned: "相公", Use: []string{"郎君", "先生"}}})
+	got := MergeTermCorrections(dst, []TermCorrection{{Banned: "相公", Use: []string{"郎君", "先生"}}})
 	if len(got) != 2 {
 		t.Fatalf("新条目应叠加而非覆盖整表: %+v", got)
 	}
@@ -95,7 +95,7 @@ func TestMergeTermCorrectionsAccumulates(t *testing.T) {
 // 同键覆盖 = 用户改主意了，新的理由/替代项替换旧的。
 func TestMergeTermCorrectionsSameKeyOverrides(t *testing.T) {
 	dst := []TermCorrection{{Banned: "相公", Use: []string{"郎君"}, Note: "旧理由"}}
-	got := mergeTermCorrections(dst, []TermCorrection{{Banned: "相公", Use: []string{"君"}, Note: "新理由"}})
+	got := MergeTermCorrections(dst, []TermCorrection{{Banned: "相公", Use: []string{"君"}, Note: "新理由"}})
 	if len(got) != 1 {
 		t.Fatalf("同键应覆盖，期望 1 条，实际 %d: %+v", len(got), got)
 	}
@@ -107,7 +107,7 @@ func TestMergeTermCorrectionsSameKeyOverrides(t *testing.T) {
 // 深拷贝：上游候选被后续修改不能串味到快照里。
 func TestMergeTermCorrectionsDeepCopiesUse(t *testing.T) {
 	src := []TermCorrection{{Banned: "相公", Use: []string{"郎君", "先生"}}}
-	got := mergeTermCorrections(nil, src)
+	got := MergeTermCorrections(nil, src)
 	src[0].Use[0] = "被改坏"
 	if got[0].Use[0] != "郎君" {
 		t.Fatalf("Use 未深拷贝，源被污染: %+v", got[0])

@@ -86,7 +86,7 @@ func BuildSnapshot(cands []Candidate) Snapshot {
 			snap.Structured.ForbiddenPhrases = s.ForbiddenPhrases
 		}
 		if len(s.TermCorrections) > 0 {
-			snap.Structured.TermCorrections = mergeTermCorrections(snap.Structured.TermCorrections, s.TermCorrections)
+			snap.Structured.TermCorrections = MergeTermCorrections(snap.Structured.TermCorrections, s.TermCorrections)
 		}
 		if len(s.FatigueWords) > 0 {
 			snap.Structured.FatigueWords = mergeFatigueWords(snap.Structured.FatigueWords, s.FatigueWords)
@@ -129,7 +129,7 @@ func OverlaySnapshot(base Snapshot, cand Candidate) Snapshot {
 		out.Structured.ForbiddenPhrases = s.ForbiddenPhrases
 	}
 	if len(s.TermCorrections) > 0 {
-		out.Structured.TermCorrections = mergeTermCorrections(out.Structured.TermCorrections, s.TermCorrections)
+		out.Structured.TermCorrections = MergeTermCorrections(out.Structured.TermCorrections, s.TermCorrections)
 	}
 	if len(s.FatigueWords) > 0 {
 		out.Structured.FatigueWords = mergeFatigueWords(cloneFatigue(out.Structured.FatigueWords), s.FatigueWords)
@@ -186,7 +186,7 @@ func cloneFatigue(m map[string]int) map[string]int {
 // 语义也正好是「用户改主意了」——用新的理由/替代项替换旧的。
 //
 // 输出始终非 nil 切片元素独立：Use 走深拷贝，避免上游候选被后续修改串味。
-func mergeTermCorrections(dst, src []TermCorrection) []TermCorrection {
+func MergeTermCorrections(dst, src []TermCorrection) []TermCorrection {
 	if len(src) == 0 {
 		return dst
 	}
