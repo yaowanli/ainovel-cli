@@ -41,6 +41,7 @@ func TestParseNormalizerJSON_FullOutput(t *testing.T) {
     "genre": "都市",
     "forbidden_chars": [],
     "forbidden_phrases": ["某种程度上"],
+    "term_corrections": [{"banned": "沈相公", "use": ["郎君", "先生"], "note": "明清才通行"}],
     "fatigue_words": [{"word": "竟然", "max_per_chapter": 2}]
   },
   "preferences": "主角冷静克制",
@@ -63,6 +64,10 @@ func TestParseNormalizerJSON_FullOutput(t *testing.T) {
 	}
 	if len(cand.Structured.ForbiddenPhrases) != 1 || cand.Structured.ForbiddenPhrases[0] != "某种程度上" {
 		t.Fatalf("forbidden_phrases 解析错误：%v", cand.Structured.ForbiddenPhrases)
+	}
+	if len(cand.Structured.TermCorrections) != 1 ||
+		cand.Structured.TermCorrections[0].Banned != "沈相公" {
+		t.Fatalf("term_corrections 解析错误：%+v", cand.Structured.TermCorrections)
 	}
 	if cand.Structured.FatigueWords["竟然"] != 2 {
 		t.Fatalf("fatigue_words 数组应转成 map：%v", cand.Structured.FatigueWords)
@@ -165,7 +170,7 @@ func (m *scriptedModel) SupportsTools() bool { return false }
 func TestNormalize_FeedbackRetryRecovers(t *testing.T) {
 	model := &scriptedModel{replies: []string{
 		"这不是 JSON",
-		`{"structured":{"genre":"","forbidden_chars":[],"forbidden_phrases":["某种程度上"],"fatigue_words":[]},"preferences":"","uncertain":[]}`,
+		`{"structured":{"genre":"","forbidden_chars":[],"forbidden_phrases":["某种程度上"],"term_corrections":[],"fatigue_words":[]},"preferences":"","uncertain":[]}`,
 	}}
 	n := NewNormalizer(model)
 
@@ -201,7 +206,7 @@ func TestNormalize_FeedbackRetryRecovers(t *testing.T) {
 
 // 归一化不覆盖模型的 thinking 默认；普通 chat 模型会拒绝显式 off。
 func TestNormalize_LeavesThinkingUnspecifiedAndReservesTokens(t *testing.T) {
-	model := &scriptedModel{replies: []string{`{"structured":{"genre":"","forbidden_chars":[],"forbidden_phrases":[],"fatigue_words":[]},"preferences":"x","uncertain":[]}`}}
+	model := &scriptedModel{replies: []string{`{"structured":{"genre":"","forbidden_chars":[],"forbidden_phrases":[],"term_corrections":[],"fatigue_words":[]},"preferences":"x","uncertain":[]}`}}
 	n := NewNormalizer(model)
 
 	if _, err := n.Normalize(t.Context(), "startup_prompt", "随便一条规则"); err != nil {
@@ -271,7 +276,7 @@ func (m *flakyModel) Generate(ctx context.Context, msgs []agentcore.Message, too
 
 func TestNormalize_RetryableErrorRecovers(t *testing.T) {
 	model := &flakyModel{
-		scriptedModel: scriptedModel{replies: []string{`{"structured":{"genre":"","forbidden_chars":[],"forbidden_phrases":[],"fatigue_words":[]},"preferences":"x","uncertain":[]}`}},
+		scriptedModel: scriptedModel{replies: []string{`{"structured":{"genre":"","forbidden_chars":[],"forbidden_phrases":[],"term_corrections":[],"fatigue_words":[]},"preferences":"x","uncertain":[]}`}},
 		failures:      2,
 	}
 	n := NewNormalizer(model)
@@ -297,7 +302,7 @@ func (m *nativeRulesModel) Capabilities() llm.Capabilities {
 func TestNormalize_NativeSendsSchemaAndRejectsFences(t *testing.T) {
 	// 原生模式：schema 进请求；裸 JSON 成功。
 	model := &nativeRulesModel{&scriptedModel{replies: []string{
-		`{"structured":{"genre":"","forbidden_chars":[],"forbidden_phrases":[],"fatigue_words":[]},"preferences":"x","uncertain":[]}`,
+		`{"structured":{"genre":"","forbidden_chars":[],"forbidden_phrases":[],"term_corrections":[],"fatigue_words":[]},"preferences":"x","uncertain":[]}`,
 	}}}
 	n := NewNormalizer(model)
 	cand, err := n.Normalize(t.Context(), "startup_prompt", "规则")

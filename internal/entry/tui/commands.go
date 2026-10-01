@@ -153,6 +153,16 @@ func commandRegistryInstance() commandRegistry {
 			},
 		},
 		{
+			Name:        "rules",
+			Group:       "writing",
+			Usage:       "/rules <list|check>",
+			Description: "查看用户规则，或回扫全书已写章节的规则违规",
+			Run: func(m Model, args []string) (tea.Model, tea.Cmd) {
+				next, _ := runRules(m, args)
+				return next, nil
+			},
+		},
+		{
 			Name:        "next",
 			Group:       "writing",
 			Usage:       "/next",

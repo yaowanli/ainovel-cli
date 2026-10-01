@@ -76,7 +76,8 @@ AI 味的本质是**过度工整、面面俱到、解释充分**，不是用词�
 
 `working_memory.user_rules` 是用户/本书/题材的偏好，作为本节"写作标准"的**追加约束**：
 
-- `structured` 字段（forbidden_chars、forbidden_phrases、fatigue_words）是机械规则，commit 时会被强制检查。
+- `structured` 字段（forbidden_chars、forbidden_phrases、term_corrections、fatigue_words）是机械规则，commit 时会被强制检查。
+- `term_corrections` 是「禁用词 → 该用什么」的对照表，形如 `{banned, use, note}`。改写时**严格按 `use` 给的写法替换**，不要自行另选替代——尤其历史题材的时代称谓，`use` 是用户给出的、本书语境下正确的写法，你换个词大概率就错了。`use` 为空时不要编造替代，只把该词换成一个语境自洽的普通说法，并在 writer_feedback 里记一句"缺少替代项，待用户确认"。
 - `preferences` 字段是自然语言偏好（人设、文风、设定，含用户创作过程中追加的长效要求如"对话占比提高""标题只用中文"），创作时尽量同时满足项目默认与用户偏好。
 - 用户偏好与本节项目默认冲突时，**用户偏好优先**；但产物落盘和提交前一致性检查不变。
 

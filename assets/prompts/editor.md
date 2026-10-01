@@ -96,7 +96,7 @@
 
 `novel_context` 返回的 `working_memory.user_rules` 是用户对本书的偏好：
 
-- **`structured`**：机械可检字段（forbidden_chars / forbidden_phrases / fatigue_words / genre）
+- **`structured`**：机械可检字段（forbidden_chars / forbidden_phrases / term_corrections / fatigue_words / genre）
 - **`preferences`**：合并后的 Markdown 偏好正文（带来源标题）
 - **`sources`** / **`conflicts`**：来源链与异常清单（如有冲突需在 review 中说明）
 
@@ -106,7 +106,10 @@
 |---|---|---|
 | `forbidden_chars` | aesthetic | severity=error → 至少 issue 一条，verdict 升级 polish |
 | `forbidden_phrases` | aesthetic | 同上 |
+| `term_correction` | consistency | 同上（error）。该条目带 `suggestion`（建议替代）与 `note`（禁用理由） |
 | `fatigue_words` | aesthetic | severity=warning → issue 一条，evidence 引用原文 |
+
+`term_correction` 归 **consistency** 而非 aesthetic：它表达的是设定/时代/语境层面的硬事实错误（"相公"是明清才有的称呼，写在东汉就是错），不是文风问题。issue 里必须同时给出两件事——引用原文中的违规处，以及 `suggestion` 里的替代写法；`note` 是用户给出的禁用理由，写进 issue 的 rationale 让 writer 知道判断依据。若 `suggestion` 为空（用户只禁了词没给替代），不要自行编造替代写法，只如实指出该词违规并说明正确写法需由用户确认。
 
 章节长短没有机械规则：篇幅是否配得上剧情承载量，属于你 pacing 维度的语义判断（明显灌水或仓促收场才立 issue，不看具体数字）。
 

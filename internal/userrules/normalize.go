@@ -35,6 +35,11 @@ var normalizeContract = llmcontract.Contract{
 			schema.Property("genre", schema.String("题材;无则空字符串")).Required(),
 			schema.Property("forbidden_chars", schema.Array("禁止出现的字符", schema.String("字符"))).Required(),
 			schema.Property("forbidden_phrases", schema.Array("禁止出现的短语(字面精确匹配)", schema.String("短语"))).Required(),
+			schema.Property("term_corrections", schema.Array("术语对照:禁用→该用什么", schema.Object(
+				schema.Property("banned", schema.String("禁用的词或短语(字面精确匹配)")).Required(),
+				schema.Property("use", schema.Array("建议替代,按优先级", schema.String("替代写法"))).Required(),
+				schema.Property("note", schema.String("理由(时代/语境/禁忌来源);无则空字符串")).Required(),
+			))).Required(),
 			schema.Property("fatigue_words", schema.Array("疲劳词及每章出现上限", schema.Object(
 				schema.Property("word", schema.String("疲劳词")).Required(),
 				schema.Property("max_per_chapter", schema.Int("每章出现次数上限(正整数)")).Required(),
@@ -124,7 +129,14 @@ type normalizerStructured struct {
 	Genre            string             `json:"genre"`
 	ForbiddenChars   []string           `json:"forbidden_chars"`
 	ForbiddenPhrases []string           `json:"forbidden_phrases"`
+	TermCorrections  []termEntry        `json:"term_corrections"`
 	FatigueWords     []fatigueWordEntry `json:"fatigue_words"`
+}
+
+type termEntry struct {
+	Banned string   `json:"banned"`
+	Use    []string `json:"use"`
+	Note   string   `json:"note"`
 }
 
 type fatigueWordEntry struct {
@@ -134,6 +146,9 @@ type fatigueWordEntry struct {
 
 // toCandidate 校验边界 DTO 并转成领域候选：fatigue 条目须词非空、上限为正整数
 // （校验错误可反馈给模型修正），领域侧仍是 map[string]int。
+//
+// term_corrections 与 forbidden_phrases 互斥去重：同一词若两侧都出现，
+// 以 term_corrections 为准（它多带了替代项与理由，信息严格更多）。
 func (o normalizerOutput) toCandidate(source string) (rules.Candidate, error) {
 	var fatigue map[string]int
 	for _, e := range o.Structured.FatigueWords {
@@ -149,12 +164,40 @@ func (o normalizerOutput) toCandidate(source string) (rules.Candidate, error) {
 		}
 		fatigue[word] = e.MaxPerChapter
 	}
+
+	terms, seen := make([]rules.TermCorrection, 0, len(o.Structured.TermCorrections)), map[string]bool{}
+	for _, e := range o.Structured.TermCorrections {
+		banned := strings.TrimSpace(e.Banned)
+		if banned == "" {
+			return rules.Candidate{}, fmt.Errorf("term_corrections 含空 banned 条目")
+		}
+		if seen[banned] {
+			continue
+		}
+		seen[banned] = true
+		terms = append(terms, rules.TermCorrection{
+			Banned: banned,
+			Use:    nonEmpty(e.Use),
+			Note:   strings.TrimSpace(e.Note),
+		})
+	}
+	// 已被 term_corrections 覆盖的词不再重复登记为裸禁用短语。
+	phrases := make([]string, 0, len(o.Structured.ForbiddenPhrases))
+	for _, p := range o.Structured.ForbiddenPhrases {
+		p = strings.TrimSpace(p)
+		if p == "" || seen[p] {
+			continue
+		}
+		phrases = append(phrases, p)
+	}
+
 	return rules.Candidate{
 		Source: source,
 		Structured: rules.Structured{
 			Genre:            strings.TrimSpace(o.Structured.Genre),
 			ForbiddenChars:   nonEmpty(o.Structured.ForbiddenChars),
-			ForbiddenPhrases: nonEmpty(o.Structured.ForbiddenPhrases),
+			ForbiddenPhrases: phrases,
+			TermCorrections:  terms,
 			FatigueWords:     fatigue,
 		},
 		Preferences: strings.TrimSpace(o.Preferences),
@@ -179,10 +222,15 @@ const normalizerSystemPrompt = `你是 AI 小说写作系统的「规则归一�
 【保守提升——最重要】
 - 只有用户明确、无歧义时才写入 structured。
 - forbidden_chars/forbidden_phrases 是 error 级:只有「不要出现X/禁用X/别写X」这类明确禁止才提升。
+- term_corrections 是 error 级,用于「禁用X,应写Y」:只有当用户明确给出了替代写法(「别用相公,改用郎君/先生」)才提升。use 必须逐字照抄用户给的替代项,不得自行补充你知道的其它写法。
+  - 同一词只放 term_corrections,不要同时放 forbidden_phrases。
+  - 禁用了但用户没给替代写法 → 放 forbidden_phrases,不要臆造 use。
+  - note 用一句话说明理由(时代/语境/禁忌来源),取用户给出的依据;用户没说就留空。
 - fatigue_words:只有同时给出「明确的词」和「明确的次数阈值」才提升;「少用X/别老用X」没给数字的放进 preferences,绝不自己发明阈值。
 - 字数/篇幅类意愿(「每章3000字」「短一点」)一律放 preferences:章节长度是叙事节奏问题,由创作时自然把握,不做机械检查。
 - 不可机械检查、无明确阈值、依赖语境的,一律放 preferences。
 - 原则:宁可漏进 structured,也不要错误提升(那会每章误报)。
+- 历史题材的时代称谓禁用词,若用户未给替代写法,不要自行编造该朝代的正确称谓——那是用户的领域判断,不是你的。把禁用放进 forbidden_phrases,把正确称谓的说明放进 preferences 供用户补充。
 
 preferences 用一段可读的自然语言保留风格、人物与审美偏好。
 uncertain 说明你故意没有提升到 structured 的项目及原因。`

@@ -840,6 +840,17 @@ func (h *Host) ReworkStatus() (*domain.ReworkPass, error) {
 	return progress.ReworkPass, nil
 }
 
+// SweepRules 用当前生效的用户规则快照回扫全书已完成章节，返回违规事实清单。
+// 纯读取，不落盘、不改写、不进 PendingRewrites——改写仍走 editor 裁定。
+func (h *Host) SweepRules() (userrules.SweepResult, error) {
+	return userrules.Sweep(h.store, nil)
+}
+
+// UserRulesSnapshot 返回当前规则快照（含 status 与 structured 字段）。
+func (h *Host) UserRulesSnapshot() (*rules.Snapshot, error) {
+	return h.userRules.GetOrBuild(h.runCtx)
+}
+
 // ReworkPlan 是一次 /rework 启动前的可读摘要，供 TUI 二次确认。
 type ReworkPlan struct {
 	StartChapter int

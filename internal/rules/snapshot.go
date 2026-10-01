@@ -33,10 +33,11 @@ const (
 )
 
 // SnapshotVersion 是当前快照 schema 版本，便于未来迁移。
+// v3：新增 term_corrections（禁用词 → 建议替代 + 理由）。
 // v2：chapter_words 退出 structured（字数是语义软约束，走 preferences）。
-// v1 快照直接加载兼容：未知字段被反序列化忽略，下次叠加保存时自然收敛为 v2；
+// 旧快照直接加载兼容：未知字段被反序列化忽略，下次叠加保存时自然收敛为当前版本；
 // 刻意不做"版本不符即重建"——那会丢掉 AddRuntimeRule 运行中追加的不可再生规则。
-const SnapshotVersion = 2
+const SnapshotVersion = 3
 
 // Candidate 是单个来源归一化后的候选结果。
 //
@@ -84,6 +85,9 @@ func BuildSnapshot(cands []Candidate) Snapshot {
 		if len(s.ForbiddenPhrases) > 0 {
 			snap.Structured.ForbiddenPhrases = s.ForbiddenPhrases
 		}
+		if len(s.TermCorrections) > 0 {
+			snap.Structured.TermCorrections = mergeTermCorrections(snap.Structured.TermCorrections, s.TermCorrections)
+		}
 		if len(s.FatigueWords) > 0 {
 			snap.Structured.FatigueWords = mergeFatigueWords(snap.Structured.FatigueWords, s.FatigueWords)
 		}
@@ -123,6 +127,9 @@ func OverlaySnapshot(base Snapshot, cand Candidate) Snapshot {
 	}
 	if len(s.ForbiddenPhrases) > 0 {
 		out.Structured.ForbiddenPhrases = s.ForbiddenPhrases
+	}
+	if len(s.TermCorrections) > 0 {
+		out.Structured.TermCorrections = mergeTermCorrections(out.Structured.TermCorrections, s.TermCorrections)
 	}
 	if len(s.FatigueWords) > 0 {
 		out.Structured.FatigueWords = mergeFatigueWords(cloneFatigue(out.Structured.FatigueWords), s.FatigueWords)
@@ -172,6 +179,49 @@ func cloneFatigue(m map[string]int) map[string]int {
 	return out
 }
 
+// mergeTermCorrections 按 Banned 键叠加，后到者覆盖同键条目。
+//
+// 刻意不同于 forbidden_phrases 的整表覆盖：对照表是逐次累积的（今天加「沈相公」，
+// 明天加「相公」），整表覆盖会把已采纳的条目连带 Use/Note 一起抹掉。同键覆盖的
+// 语义也正好是「用户改主意了」——用新的理由/替代项替换旧的。
+//
+// 输出始终非 nil 切片元素独立：Use 走深拷贝，避免上游候选被后续修改串味。
+func mergeTermCorrections(dst, src []TermCorrection) []TermCorrection {
+	if len(src) == 0 {
+		return dst
+	}
+	idx := make(map[string]int, len(dst)+len(src))
+	out := make([]TermCorrection, 0, len(dst)+len(src))
+	for _, tc := range dst {
+		b := strings.TrimSpace(tc.Banned)
+		if b == "" {
+			continue
+		}
+		tc.Banned = b
+		tc.Use = append([]string(nil), tc.Use...)
+		if _, dup := idx[b]; dup {
+			continue
+		}
+		idx[b] = len(out)
+		out = append(out, tc)
+	}
+	for _, tc := range src {
+		b := strings.TrimSpace(tc.Banned)
+		if b == "" {
+			continue
+		}
+		tc.Banned = b
+		tc.Use = append([]string(nil), tc.Use...)
+		if at, ok := idx[b]; ok {
+			out[at] = tc
+			continue
+		}
+		idx[b] = len(out)
+		out = append(out, tc)
+	}
+	return out
+}
+
 // SystemDefaults 是代码内置的机械基线（最低优先级来源），不走 LLM 归一化。
 //
 // 数值迁自旧 assets/rules/default.md 的 front matter。阈值依据一并保留：
@@ -201,7 +251,27 @@ func sanitizeStructured(s Structured) Structured {
 	}
 	out.ForbiddenChars = nonEmptyStrings(s.ForbiddenChars)
 	out.ForbiddenPhrases = nonEmptyStrings(s.ForbiddenPhrases)
+	out.TermCorrections = sanitizeTermCorrections(s.TermCorrections)
 	out.FatigueWords = sanitizeFatigueWords(s.FatigueWords)
+	return out
+}
+
+// sanitizeTermCorrections 去空白与去重键。Banned 重复时保留首条——对照表由多次
+// 追加累积而成，同一词重复登记没有意义，替代项取先登记的那份。
+func sanitizeTermCorrections(in []TermCorrection) []TermCorrection {
+	var out []TermCorrection
+	seen := make(map[string]bool, len(in))
+	for _, tc := range in {
+		b := strings.TrimSpace(tc.Banned)
+		if b == "" || seen[b] {
+			continue
+		}
+		seen[b] = true
+		tc.Banned = b
+		tc.Use = nonEmptyStrings(tc.Use)
+		tc.Note = strings.TrimSpace(tc.Note)
+		out = append(out, tc)
+	}
 	return out
 }
 
