@@ -145,7 +145,8 @@ func runRulesEra(m Model, args []string) (Model, tea.Cmd, bool) {
 		m.applyEvent(host.Event{
 			Time: time.Now(), Category: "ERROR", Level: "error",
 			Summary: "用法：/rules era <朝代>，例如 /rules era 东汉末年\n" +
-				"内置对照表覆盖先秦至清，标注哪一节的条目该采纳由你决定。",
+				"内置对照表覆盖先秦至清，标注哪一节的条目该采纳由你决定。\n" +
+				"本书专用词条写在 output/novel/style/era-terminology.md，维护指南见 docs/era-terminology.md。",
 		})
 		m.refreshEventViewport()
 		return m, nil, true
