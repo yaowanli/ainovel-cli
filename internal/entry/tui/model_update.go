@@ -685,6 +685,13 @@ func (m Model) handleRuntimeMsg(msg tea.Msg) (tea.Model, tea.Cmd, bool) {
 			boxW, _ := reportModalSize(m.width, m.height)
 			s.refresh(paddedModalContentWidth(boxW))
 		}
+		if s := m.simulator; s != nil && !s.done {
+			// 与 importer 同理：长任务面板靠这个 tick 走 spinner 并刷新已用时，
+			// 否则「在动还是卡死」只能靠用户猜。
+			s.frame = m.cursorIdx
+			boxW, _ := reportModalSize(m.width, m.height)
+			s.refresh(paddedModalContentWidth(boxW))
+		}
 		return m, tickSpinner(), true
 	case eventSpinnerTickMsg:
 		m.eventSpinnerIdx = (m.eventSpinnerIdx + 1) % len(eventSpinnerFrames)

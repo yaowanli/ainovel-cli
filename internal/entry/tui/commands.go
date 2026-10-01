@@ -158,8 +158,8 @@ func commandRegistryInstance() commandRegistry {
 			Usage:       "/rules <list|check|propose|proposals|adopt|reject>",
 			Description: "查看规则、回扫违规、生成/裁决时代术语候选",
 			Run: func(m Model, args []string) (tea.Model, tea.Cmd) {
-				next, _ := runRules(m, args)
-				return next, nil
+				next, cmd, _ := runRules(m, args)
+				return next, cmd
 			},
 		},
 		{
@@ -406,8 +406,13 @@ func prepareFileStart(args []string) (string, error) {
 func (m Model) handleSlashCommand(cmd slashCommand) (tea.Model, tea.Cmd) {
 	spec, ok := commandRegistryInstance().Find(cmd.name)
 	if !ok {
+		msg := "未知命令：/" + cmd.name
+		// 打错字是未知命令最主要的原因，直接给出猜测比让用户翻列表省事。
+		if s := commandRegistryInstance().Suggest(cmd.name); s != "" {
+			msg += fmt.Sprintf("\n是否想输入 /%s？", s)
+		}
 		m.applyEvent(host.Event{
-			Time: time.Now(), Category: "ERROR", Summary: "未知命令：/" + cmd.name, Level: "error",
+			Time: time.Now(), Category: "ERROR", Summary: msg, Level: "error",
 		})
 		m.refreshEventViewport()
 		return m, nil

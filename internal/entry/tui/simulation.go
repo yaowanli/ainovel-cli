@@ -42,6 +42,7 @@ type simulationState struct {
 	current    int
 	total      int
 	startedAt  time.Time
+	frame      int // spinner 帧，由 spinnerTickMsg 推进
 	finishedAt time.Time
 	history    []simulationLine
 	err        error
@@ -87,6 +88,25 @@ func newSimulationState(reqID int, title, source string, width, height int, canc
 	return s
 }
 
+// elapsed 返回已耗时；未完成时按当前时刻算，完成后固定为实际耗时。
+//
+// 负值一律夹到 0：finishedAt 早于 startedAt 是可能的（时钟回拨、状态文件被手改、
+// 跨时区），而 formatElapsed 遇负 duration 会渲染成 "00:-48" 这种脏输出。
+// 宁可显示 0 秒，也不要给用户看一个自相矛盾的面板。
+func (s *simulationState) elapsed() time.Duration {
+	if s.startedAt.IsZero() {
+		return 0
+	}
+	end := time.Now()
+	if !s.finishedAt.IsZero() {
+		end = s.finishedAt
+	}
+	if d := end.Sub(s.startedAt); d > 0 {
+		return d
+	}
+	return 0
+}
+
 func (s *simulationState) appendEvent(ev panelEvent, contentW int) {
 	s.stage = ev.stage
 	s.current = ev.current
@@ -127,7 +147,20 @@ func (s *simulationState) refresh(contentW int) {
 		b.WriteString(dimStyle.Render("  完成 "))
 		b.WriteString(formatReportTime(s.finishedAt))
 	}
+	// 耗时：LLM 调用可能几十秒，只有起止时间戳的话用户无法判断「是在动还是卡死」。
+	// 运行中显示实时秒数，靠 spinner tick 带动（面板每帧重绘）。
+	if d := s.elapsed(); d > 0 {
+		b.WriteString(dimStyle.Render("  已用时 "))
+		b.WriteString(formatElapsed(d))
+	}
 	b.WriteString("\n\n")
+
+	// 运行中把 spinner 与耗时放在阶段行首，位置与 /import 的进行中提示一致：
+	// 用户扫一眼标题区就知道「在动，且动了多久」，不必去比对两个时间戳。
+	if !s.done {
+		b.WriteString(renderEventSparkle(s.frame, 0))
+		b.WriteString(" ")
+	}
 
 	b.WriteString(mutedStyle.Render("阶段 "))
 	b.WriteString(stageStyle.Render(s.stage))

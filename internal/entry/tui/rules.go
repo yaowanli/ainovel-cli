@@ -14,6 +14,8 @@ import (
 	"strings"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
+
 	"github.com/voocel/ainovel-cli/internal/host"
 	"github.com/voocel/ainovel-cli/internal/rules"
 	storepkg "github.com/voocel/ainovel-cli/internal/store"
@@ -34,44 +36,48 @@ check 只报告不改写。确认要修之后用 /rework <章号> 让 Editor 逐
 强制改写，一条错误的历史称谓代价比漏查更高。`
 
 // runRules 实现 /rules 的分发。返回是否已消费本次命令。
-func runRules(m Model, args []string) (Model, bool) {
+func runRules(m Model, args []string) (Model, tea.Cmd, bool) {
 	if len(args) == 0 {
 		m.applyEvent(host.Event{Time: time.Now(), Category: "SYSTEM", Level: "info", Summary: rulesUsage})
 		m.refreshEventViewport()
-		return m, true
+		return m, nil, true
 	}
 	switch args[0] {
 	case "help", "-h", "--help":
 		m.applyEvent(host.Event{Time: time.Now(), Category: "SYSTEM", Level: "info", Summary: rulesUsage})
 		m.refreshEventViewport()
-		return m, true
+		return m, nil, true
 	case "list", "ls":
 		snap, err := m.runtime.UserRulesSnapshot()
 		if err != nil {
 			m.applyEvent(host.Event{Time: time.Now(), Category: "ERROR", Level: "error", Summary: "读取规则失败：" + err.Error()})
 			m.refreshEventViewport()
-			return m, true
+			return m, nil, true
 		}
 		m.applyEvent(host.Event{Time: time.Now(), Category: "SYSTEM", Level: "info", Summary: formatRulesList(snap)})
 		m.refreshEventViewport()
-		return m, true
+		return m, nil, true
 	case "check", "scan":
-		return runRulesCheck(m), true
+		next := runRulesCheck(m)
+		return next, nil, true
 	case "propose":
-		return runRulesPropose(m, args[1:]), true
+		return runRulesPropose(m, args[1:])
 	case "proposals":
-		return runRulesProposals(m), true
+		next := runRulesProposals(m)
+		return next, nil, true
 	case "adopt":
-		return runRulesAdopt(m, args[1:]), true
+		next := runRulesAdopt(m, args[1:])
+		return next, nil, true
 	case "reject":
-		return runRulesReject(m, args[1:]), true
+		next := runRulesReject(m, args[1:])
+		return next, nil, true
 	}
 	m.applyEvent(host.Event{
 		Time: time.Now(), Category: "ERROR", Level: "error",
 		Summary: fmt.Sprintf("未知子命令：%s\n%s", args[0], rulesUsage),
 	})
 	m.refreshEventViewport()
-	return m, true
+	return m, nil, true
 }
 
 func runRulesCheck(m Model) Model {
@@ -131,13 +137,13 @@ func formatSweepResult(r userrules.SweepResult) string {
 
 // runRulesPropose 生成时代术语候选表。朝代不给时只作建议、不猜——猜错朝代会
 // 产出一整批无关候选，而用户看不出那些是猜错的。
-func runRulesPropose(m Model, args []string) Model {
+func runRulesPropose(m Model, args []string) (Model, tea.Cmd, bool) {
 	if len(args) == 0 {
 		snap, err := m.runtime.UserRulesSnapshot()
 		if err != nil {
 			m.applyEvent(host.Event{Time: time.Now(), Category: "ERROR", Level: "error", Summary: "读取题材失败：" + err.Error()})
 			m.refreshEventViewport()
-			return m
+			return m, nil, false
 		}
 		if guess := userrules.SuggestEra(snap); guess != "" {
 			m.applyEvent(host.Event{
@@ -148,43 +154,27 @@ func runRulesPropose(m Model, args []string) Model {
 					"系统不会替你猜朝代——猜错会产出一整批无关候选。",
 			})
 			m.refreshEventViewport()
-			return m
+			return m, nil, false
 		}
 		m.applyEvent(host.Event{
 			Time: time.Now(), Category: "ERROR", Level: "error",
 			Summary: "需要指定朝代：/rules propose <朝代>，例如 /rules propose 东汉末年",
 		})
 		m.refreshEventViewport()
-		return m
+		return m, nil, false
 	}
 
 	era := strings.Join(args, " ")
-	m.applyEvent(host.Event{Time: time.Now(), Category: "SYSTEM", Level: "info", Summary: "正在生成「" + era + "」的时代术语候选表……"})
-	m.refreshEventViewport()
-
-	doc, err := m.runtime.GenerateEraProposals(era)
+	m.simSeq++
+	state, cmd, err := startEraPropose(m.runtime, m.simSeq, era, m.width, m.height)
 	if err != nil {
-		m.applyEvent(host.Event{Time: time.Now(), Category: "ERROR", Level: "error", Summary: "生成候选失败：" + err.Error()})
+		m.applyEvent(host.Event{Time: time.Now(), Category: "ERROR", Level: "error", Summary: "启动候选生成失败：" + err.Error()})
 		m.refreshEventViewport()
-		return m
+		return m, nil, false
 	}
-	var low int
-	for _, p := range doc.Proposals {
-		if p.Confidence == "low" {
-			low++
-		}
-	}
-	m.applyEvent(host.Event{
-		Time: time.Now(), Category: "SYSTEM", Level: "info",
-		Summary: fmt.Sprintf("已生成 %d 条候选（%d 条自报 low 把握）。候选尚未生效，需逐条审阅：\n"+
-			"  /rules proposals          查看（low 把握排在前面）\n"+
-			"  /rules adopt <词>         采纳为生效规则\n"+
-			"  /rules reject <词>        否决\n"+
-			"这些是模型依据「%s」生成的，未经核实；命中后会被强制改写正文，所以务必自己过一遍。",
-			len(doc.Proposals), low, doc.Era),
-	})
-	m.refreshEventViewport()
-	return m
+	m.simulator = state
+	m.textarea.Blur()
+	return m, cmd, true
 }
 
 func runRulesProposals(m Model) Model {
