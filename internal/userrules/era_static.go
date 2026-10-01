@@ -3,6 +3,7 @@ package userrules
 import (
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -31,13 +32,26 @@ var eraTermLine = regexp.MustCompile(`^\s*[-*]\s*(?:\*\*)?([^＊]+?)(?:\*\*)?\s*
 func ParseEraTerminology(md, era string) []store.EraProposal {
 	var out []store.EraProposal
 	seen := map[string]bool{}
+	// allowed 记录哪些词曾被标为「该时代可用」。用户覆盖可能想解封内置禁用项
+	// （写「相公（可用）」），而解析按词去重取首条——若不做两遍扫描，内置的
+	// 禁用项会赢，用户看到的是静默失效：写了不生效，也不报错。
+	allowed := map[string]bool{}
+	inFence := false
 
 	for _, line := range strings.Split(md, "\n") {
 		line = strings.TrimRight(line, " \t\r")
 		if strings.TrimSpace(line) == "" {
 			continue
 		}
-		// 分节标题只用于标记后续条目的适用范围
+		// 跳过围栏代码块。维护文档里的示例（`- **相国** → 丞相`）若被当数据收进
+		// 候选，会凭空产生「相国」禁用项并被用户误采纳——表文件混进文档就出这种事。
+		if strings.HasPrefix(strings.TrimSpace(line), "```") {
+			inFence = !inFence
+			continue
+		}
+		if inFence {
+			continue
+		}
 		m := eraTermLine.FindStringSubmatch(line)
 		if m == nil {
 			continue
@@ -48,7 +62,7 @@ func ParseEraTerminology(md, era string) []store.EraProposal {
 			continue
 		}
 		banned = strings.Trim(banned, "*_` ")
-		if banned == "" || seen[banned] {
+		if banned == "" {
 			continue
 		}
 
@@ -68,12 +82,15 @@ func ParseEraTerminology(md, era string) []store.EraProposal {
 				}
 			}
 		}
-		// 「可用」类条目必须跳过，否则会把该时代本来正确的词禁掉——
-		// 在东汉书里禁用「太守/刺史/朝廷」是灾难性误伤。
-		if skipAllowedEntry(banned, use, rhs, note) {
+		// 「可用」类条目不在此跳过，统一留给第二遍——解封声明可能出现在禁用项
+		// 之后，顺序不能决定结果。投票必须在去重之前做，否则用户覆盖里的解封
+		// 声明会被 seen 挡掉，永远投不上票。
+		if isAllowedEntry(banned, use, rhs, note) {
+			allowed[banned] = true
+		}
+		if seen[banned] {
 			continue
 		}
-
 		seen[banned] = true
 		out = append(out, store.EraProposal{
 			Banned:     banned,
@@ -85,19 +102,22 @@ func ParseEraTerminology(md, era string) []store.EraProposal {
 			Decision:   store.EraDecisionPending,
 		})
 	}
+	// 第二遍：剔除「该时代可用」的词。可用声明出现在禁用项之后也能解封它——
+	// 否则用户覆盖里写「相公（可用）」会被内置禁用项静默压过，写了不生效也不报错。
+	out = slices.DeleteFunc(out, func(p store.EraProposal) bool { return allowed[p.Banned] })
 	return out
 }
 
 // useAnnotationRe 匹配写替代项时附带的限定语，如「拙荆（可用）」「相公（慎用）」。
 var useAnnotationRe = regexp.MustCompile(`[（(][^）)]*[）)]\s*$`)
 
-// skipAllowedEntry 判定一条解析结果是否属于「该时代可用」而非「禁用」。
+// isAllowedEntry 判定一条解析结果是否属于「该时代可用」而非「禁用」。
 //
 // 三种形态都算可用条目：
 //   - 替代项就是禁用词本身（太守 → 太守）
 //   - 替代项写着「可用」/「不可用」/「慎用」这类说明而非具体写法
 //   - note 以「可用」开头
-func skipAllowedEntry(banned string, use []string, rhs, note string) bool {
+func isAllowedEntry(banned string, use []string, rhs, note string) bool {
 	if strings.HasPrefix(strings.TrimSpace(rhs), "可用") ||
 		strings.HasPrefix(strings.TrimSpace(rhs), "不可用") ||
 		strings.HasPrefix(strings.TrimSpace(rhs), "慎用") {

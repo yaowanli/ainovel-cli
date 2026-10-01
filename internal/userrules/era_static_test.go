@@ -168,3 +168,56 @@ func TestStaticTableProposalsNeedAdoption(t *testing.T) {
 		t.Fatalf("未采纳前不应有任何检查命中: %d", n)
 	}
 }
+
+// 用户覆盖里写「相公（可用）」必须能解封内置的禁用项。解析按词去重取首条，
+// 不做两遍扫描的话内置禁用项会赢——用户写了不生效、也不报错，静默失效。
+func TestParseEraTerminologyUserOverrideCanUnban(t *testing.T) {
+	override := "\n## 本书专用\n\n- **相公** → 相公（可用）\n- **大人** → 大人（可用）\n"
+	ps := ParseEraTerminology(sampleTable+override, "东汉末年")
+	for _, p := range ps {
+		if p.Banned == "相公" || p.Banned == "大人" {
+			t.Errorf("%s 应被用户覆盖解封，实际仍为禁用项（use=%v）", p.Banned, p.Use)
+		}
+	}
+	for _, p := range ps {
+		if p.Banned == "科举" {
+			return // 未被解封的其他禁用项应保留
+		}
+	}
+	t.Error("未被解封的禁用项不应被一并丢弃")
+}
+
+// 维护文档常在表文件里带示例。示例行若被当数据收进候选，会凭空产生
+// 「相国」这类禁用项并被误采纳。围栏代码块必须跳过。
+func TestParseEraTerminologySkipsFencedBlocks(t *testing.T) {
+	withDoc := sampleTable + `
+## 本书专用词条
+
+格式说明：
+
+` + "```markdown" + `
+- **相国** → 丞相 / 国相
+- **天工阁** → 天工阁（可用）
+` + "```" + `
+
+- **绸缎** → 绢 / 缣
+`
+	ps := ParseEraTerminology(withDoc, "东汉末年")
+	for _, p := range ps {
+		switch p.Banned {
+		case "相国", "天工阁":
+			t.Errorf("围栏内的示例 %q 不应成为候选", p.Banned)
+		case "禁用词", "词":
+			t.Errorf("文档说明行不应成为候选: %q", p.Banned)
+		}
+	}
+	found := false
+	for _, p := range ps {
+		if p.Banned == "绸缎" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("围栏外的真实条目应正常解析")
+	}
+}

@@ -194,9 +194,19 @@ func loadReferences(style string, opts LoadOptions) tools.References {
 		if styleErr == nil {
 			refs.StyleReference = string(styleRef)
 		}
-		// 时代称谓对照表是静态资料（非模型生成），/rules era 据此产出待裁决候选。
+		// 时代称谓对照表是静态资料（非模型生成），两处消费：
+		//   1. writer 提示词全程注入（vocabulary，不是技巧）
+		//   2. /rules era 解析为待裁决候选
+		// 支持三层覆盖：内置 < 全局 < 本书。本书专用称谓（主角封号、军中互称、
+		// 虚构门派叫法）无法预置在通用表里，必须允许用户自己加。
+		// 无内置表时仍要应用覆盖——用户给自己题材（非 history）准备的 era 表
+		// 不能因为内置缺失而被丢弃，那正是最需要覆盖的场景。
+		eraBuiltin := ""
 		if eraTbl, eraErr := referencesFS.ReadFile(genreDir + "era-terminology.md"); eraErr == nil {
-			refs.EraTerminology = string(eraTbl)
+			eraBuiltin = string(eraTbl)
+		}
+		if s := resolveAppendable(eraBuiltin, "era-terminology.md", opts); s != "" {
+			refs.EraTerminology = s
 		}
 		if arcErr == nil {
 			refs.ArcTemplates = string(arcTpl)

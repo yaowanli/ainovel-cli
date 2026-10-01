@@ -460,6 +460,10 @@ func (t *ContextTool) writerReferences(chapter int) map[string]string {
 	add("hook_techniques", t.refs.HookTechniques)
 	add("quality_checklist", t.refs.QualityChecklist)
 	add("anti_ai_tone", t.refs.AntiAITone) // 去 AI 味判据全程注入，不随章节裁剪
+	// 时代称谓对照表全程注入：称谓错误与章节号无关，第 200 章照样会写错。
+	// style_reference 只在前 3 章注入是因为它是写作技巧（学会就不再需要），
+	// 而这是词汇表，任何一章都可能撞上。
+	add("era_terminology", t.refs.EraTerminology)
 	if chapter <= 3 {
 		add("chapter_guide", t.refs.ChapterGuide)
 		add("dialogue_writing", t.refs.DialogueWriting)
@@ -486,6 +490,7 @@ func (t *ContextTool) architectReferences() map[string]string {
 	add("longform_planning", t.refs.LongformPlanning)
 	add("differentiation", t.refs.Differentiation)
 	add("style_reference", t.refs.StyleReference)
+	add("era_terminology", t.refs.EraTerminology)
 	add("arc_templates", t.refs.ArcTemplates)
 	add("anti_ai_tone", t.refs.AntiAITone) // architect 大纲去 AI 腔；亦兜 editor 走 Chapter=0 路径
 	return refs
