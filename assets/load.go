@@ -194,6 +194,10 @@ func loadReferences(style string, opts LoadOptions) tools.References {
 		if styleErr == nil {
 			refs.StyleReference = string(styleRef)
 		}
+		// 时代称谓对照表是静态资料（非模型生成），/rules era 据此产出待裁决候选。
+		if eraTbl, eraErr := referencesFS.ReadFile(genreDir + "era-terminology.md"); eraErr == nil {
+			refs.EraTerminology = string(eraTbl)
+		}
 		if arcErr == nil {
 			refs.ArcTemplates = string(arcTpl)
 		}

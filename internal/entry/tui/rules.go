@@ -25,7 +25,8 @@ import (
 const rulesUsage = `用法：
   /rules list                      查看当前生效的用户规则（结构化字段 + 疲劳词）
   /rules check                     用当前规则回扫全书已写章节，列出违规章与词
-  /rules propose <朝代>            为指定朝代生成时代术语候选表（不自动生效）
+  /rules era <朝代>                从内置静态对照表生成候选（不调用 LLM，推荐）
+  /rules propose <朝代>            让模型现场生成候选（慢且不稳，优先用 era）
   /rules proposals                 查看待裁决候选
   /rules adopt <词> [<词>...]      采纳候选，写入生效规则
   /rules reject <词> [<词>...]     否决候选
@@ -60,6 +61,8 @@ func runRules(m Model, args []string) (Model, tea.Cmd, bool) {
 	case "check", "scan":
 		next := runRulesCheck(m)
 		return next, nil, true
+	case "era":
+		return runRulesEra(m, args[1:])
 	case "propose":
 		return runRulesPropose(m, args[1:])
 	case "proposals":
@@ -133,6 +136,37 @@ func formatSweepResult(r userrules.SweepResult) string {
 	b.WriteString(formatSweepRanges(r.AffectedChapters()))
 	b.WriteString(" --yes")
 	return b.String()
+}
+
+// runRulesEra 从内置静态对照表生成候选。零 LLM 调用、瞬时完成、无失败风险——
+// 这是首选路径；/rules propose 走模型，慢且可能因思考预算耗尽而失败。
+func runRulesEra(m Model, args []string) (Model, tea.Cmd, bool) {
+	if len(args) == 0 {
+		m.applyEvent(host.Event{
+			Time: time.Now(), Category: "ERROR", Level: "error",
+			Summary: "用法：/rules era <朝代>，例如 /rules era 东汉末年\n" +
+				"内置对照表覆盖先秦至清，标注哪一节的条目该采纳由你决定。",
+		})
+		m.refreshEventViewport()
+		return m, nil, true
+	}
+	era := strings.Join(args, " ")
+	doc, err := m.runtime.LoadEraProposalsFromTable(era)
+	if err != nil {
+		m.applyEvent(host.Event{Time: time.Now(), Category: "ERROR", Level: "error", Summary: err.Error()})
+		m.refreshEventViewport()
+		return m, nil, true
+	}
+	m.applyEvent(host.Event{
+		Time: time.Now(), Category: "SYSTEM", Level: "info",
+		Summary: fmt.Sprintf(
+			"已从内置静态对照表生成 %d 条候选（%s）。未调用模型，瞬时完成。\n"+
+				"逐条审阅后采纳：/rules adopt <词>\n查看：/rules proposals\n"+
+				"提示：表里含各朝代条目，只采纳属于本书朝代的那部分——采纳后命中会被强制改写正文。",
+			len(doc.Proposals), doc.Era),
+	})
+	m.refreshEventViewport()
+	return m, nil, true
 }
 
 // runRulesPropose 生成时代术语候选表。朝代不给时只作建议、不猜——猜错朝代会

@@ -35,7 +35,7 @@ import (
 )
 
 // eraProposeMaxTokens 与归一化同量级：JSON 本身很小，预算主要留给推理模型的思考。
-const eraProposeMaxTokens = 8192
+const eraProposeMaxTokens = 32768
 
 var eraProposeContract = llmcontract.Contract{
 	Name:        "userrules_era_propose",

@@ -30,6 +30,7 @@ type References struct {
 	DialogueWriting  string
 	// V2
 	StyleReference   string // 风格补充参考（可为空）
+	EraTerminology   string // 题材包内的时代称谓对照表（静态资料，可作机械检查依据）
 	LongformPlanning string // 通用长篇规划参考
 	Differentiation  string // 通用差异化设计参考
 	ArcTemplates     string // 题材弧型模板（按 style 加载，可为空）

@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/voocel/agentcore"
@@ -883,10 +884,40 @@ func (h *Host) GenerateEraProposalsAsync(ctx context.Context, era string) (<-cha
 	_ = ctx
 
 	ch := make(chan EraProposalEvent, 8)
-	emit := func(stage EraStage, msg string, err error) {
+	// emit 分两类处理，因为两者的失败后果完全不同：
+	//
+	//   - 过程事件（开始/思考/重试）：满了就丢。丢一条重试提示只是少一行日志，
+	//     不影响结论，用户仍能从「已用时」判断还在动。
+	//   - 终态事件（done/error）：必须送达。丢了它面板就永远停在运行态，
+	//     用户看到的是彻底卡死、且没有任何报错——这正是最初那个 bug 的形态。
+	//
+	// 此前两者共用一个 default 丢弃的发送，缓冲仅 8：连续重试就能塞满它，
+	// 紧跟着的终态被丢掉。终态改为限时阻塞发送。
+	var dropped atomic.Int64
+	emitProgress := func(stage EraStage, msg string, err error) {
 		select {
 		case ch <- EraProposalEvent{Time: time.Now(), Stage: stage, Message: msg, Err: err}:
 		default:
+			if n := dropped.Add(1); n == 1 || n%50 == 0 {
+				slog.Warn("时代术语候选过程事件被丢弃（面板消费不及）",
+					"module", "rules", "era", era, "已丢弃", n)
+			}
+		}
+	}
+	emitTerminal := func(stage EraStage, msg string, err error) {
+		ev := EraProposalEvent{Time: time.Now(), Stage: stage, Message: msg, Err: err}
+		select {
+		case ch <- ev:
+			return
+		default:
+		}
+		// 缓冲满：留出余量等消费者，若仍无空间则放弃本次终态并记账——
+		// 宁可留下可查的痕迹，也不无声卡死。
+		select {
+		case ch <- ev:
+		case <-time.After(5 * time.Second):
+			slog.Error("时代术语候选终态事件投递失败，面板可能停在运行态",
+				"module", "rules", "era", era, "stage", stage, "已丢弃过程事件", dropped.Load())
 		}
 	}
 
@@ -899,11 +930,11 @@ func (h *Host) GenerateEraProposalsAsync(ctx context.Context, era string) (<-cha
 
 		// 终态只发一次，且由「看门狗」与「实际调用」竞争决定谁先到。
 		err := runWatchdoged(eraProposeTimeout, func(ctx context.Context) error {
-			emit(EraStageStart, "正在请求模型生成「"+era+"」的时代称谓候选", nil)
-			emit(EraStageLLM, "模型思考中（这一阶段通常最慢，几十秒到数分钟）", nil)
+			emitProgress(EraStageStart, "正在请求模型生成「"+era+"」的时代称谓候选", nil)
+			emitProgress(EraStageLLM, "模型思考中（这一阶段通常最慢，几十秒到数分钟）", nil)
 
 			doc, err := h.generateEraProposalsRetry(ctx, era, func(ev llmretry.Event) {
-				emit(EraStageRetry, fmt.Sprintf("第 %d 次重试（等待 %s 后）：%s",
+				emitProgress(EraStageRetry, fmt.Sprintf("第 %d 次重试（等待 %s 后）：%s",
 					ev.Attempt, ev.Delay.Round(time.Second), ev.Err), nil)
 			})
 			if err != nil {
@@ -918,7 +949,7 @@ func (h *Host) GenerateEraProposalsAsync(ctx context.Context, era string) (<-cha
 					low++
 				}
 			}
-			emit(EraStageDone, fmt.Sprintf(
+			emitProgress(EraStageDone, fmt.Sprintf(
 				"已生成 %d 条候选（其中 %d 条模型自报 low 把握）。\n"+
 					"候选尚未生效，需逐条审阅：\n"+
 					"  /rules proposals     查看（low 把握排在最前）\n"+
@@ -929,7 +960,7 @@ func (h *Host) GenerateEraProposalsAsync(ctx context.Context, era string) (<-cha
 			return nil
 		})
 		if err != nil {
-			emit(EraStageError, "生成失败", err)
+			emitTerminal(EraStageError, "生成失败", err)
 		}
 	}()
 
@@ -938,6 +969,27 @@ func (h *Host) GenerateEraProposalsAsync(ctx context.Context, era string) (<-cha
 
 func (h *Host) generateEraProposals(ctx context.Context, era string) (*storepkg.EraProposalDoc, error) {
 	return h.generateEraProposalsRetry(ctx, era, nil)
+}
+
+// LoadEraProposalsFromTable 从内置静态时代称谓表产出候选，不调用 LLM。
+//
+// 这是 /rules era 的路径，也是首选路径：静态表可审阅、可版本管理、零延迟零费用，
+// 且不会因模型思考预算耗尽而失败（实测 LLM 路径慢且不稳）。朝代参数只用于标注，
+// 表本身覆盖多个朝代，采纳哪几条由用户逐条定。
+func (h *Host) LoadEraProposalsFromTable(era string) (*storepkg.EraProposalDoc, error) {
+	table := h.bundle.References.EraTerminology
+	if strings.TrimSpace(table) == "" {
+		return nil, fmt.Errorf("本书题材包内没有时代称谓对照表（era-terminology.md）；" +
+			"该表目前只内置于 history 题材包，可用 /config 把 style 设为 history")
+	}
+	doc, err := userrules.LoadEraProposalsFromTable(userrules.EraStaticTable{Content: table}, era)
+	if err != nil {
+		return nil, err
+	}
+	if err := h.store.EraProposals.Save(doc); err != nil {
+		return nil, err
+	}
+	return doc, nil
 }
 
 func (h *Host) generateEraProposalsRetry(ctx context.Context, era string, onRetry func(llmretry.Event)) (*storepkg.EraProposalDoc, error) {
