@@ -29,6 +29,7 @@ import (
 	"github.com/voocel/agentcore"
 	"github.com/voocel/agentcore/schema"
 	"github.com/voocel/ainovel-cli/internal/llmcontract"
+	"github.com/voocel/ainovel-cli/internal/llmretry"
 	"github.com/voocel/ainovel-cli/internal/rules"
 	"github.com/voocel/ainovel-cli/internal/store"
 )
@@ -87,12 +88,26 @@ type eraProposeItem struct {
 // EraGenerator 生成时代术语候选。
 type EraGenerator struct {
 	model agentcore.ChatModel
+	// OnRetry 报告 provider 侧重试（限流、5xx 等）。
+	//
+	// 必须暴露：llmretry 对可重试错误是「退避后持续重试，直到成功或 ctx 结束」，
+	// 无上限。单次生成卡十几分钟多数不是模型在思考，而是被限流后反复重试——
+	// 而此前这里没接 hook，重试完全不可见，用户只能对着一个不动的进度条猜。
+	OnRetry func(attempt int, delay time.Duration, err error)
 }
 
 // NewEraGenerator 构造生成器。model 应为能力较强的模型（通常 models.Default），
 // 不必跟随写作的弱模型。
 func NewEraGenerator(model agentcore.ChatModel) *EraGenerator {
 	return &EraGenerator{model: model}
+}
+
+// WithRetryReporter 挂上重试回调（Host 侧接到面板事件流）。
+func (g *EraGenerator) WithRetryReporter(f func(attempt int, delay time.Duration, err error)) *EraGenerator {
+	if g != nil {
+		g.OnRetry = f
+	}
+	return g
 }
 
 // Generate 为 era 生成候选表。era 必须是用户明确给出的朝代或时期
@@ -122,6 +137,11 @@ func (g *EraGenerator) Generate(ctx context.Context, era string) (*store.EraProp
 		},
 		Agent: "rules",
 		Hooks: llmcontract.Hooks{
+			RequestRetry: func(ev llmretry.Event) {
+				if g.OnRetry != nil {
+					g.OnRetry(ev.Attempt, ev.Delay, ev.Err)
+				}
+			},
 			Resolved: func(res llmcontract.Resolution) {
 				slog.Debug("时代术语候选协议选择", "module", "rules", "era", era,
 					"contract", eraProposeContract.Name, "structured_mode", res.Mode,

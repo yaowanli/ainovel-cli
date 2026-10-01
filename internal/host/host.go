@@ -3,7 +3,6 @@ package host
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -26,6 +25,7 @@ import (
 	"github.com/voocel/ainovel-cli/internal/host/imp"
 	"github.com/voocel/ainovel-cli/internal/host/sim"
 	"github.com/voocel/ainovel-cli/internal/host/style"
+	"github.com/voocel/ainovel-cli/internal/llmretry"
 	runtimelog "github.com/voocel/ainovel-cli/internal/logger"
 	modelreg "github.com/voocel/ainovel-cli/internal/models"
 	"github.com/voocel/ainovel-cli/internal/notify"
@@ -860,10 +860,12 @@ func (h *Host) GenerateEraProposals(era string) (*storepkg.EraProposalDoc, error
 	return h.generateEraProposals(h.runCtx, era)
 }
 
-// eraProposeTimeout 给单次候选生成封顶。与 userRulesBuildTimeout 同量级：
+// eraProposeTimeout 给单次候选生成封顶。声明为 var 而非 const，是为了让测试能把
+// 它缩到毫秒级——看门狗逻辑必须能被真实测到，而不是靠代码审读相信它对。
+// 与 userRulesBuildTimeout 同量级：
 // 归一化整本大纲时用 3 分钟，候选表只有一个朝代、输出更小，但推理模型可能
 // 在思考阶段烧很久，故同取 3 分钟——超时应显式报错，不允许无限转圈。
-const eraProposeTimeout = 3 * time.Minute
+var eraProposeTimeout = 3 * time.Minute
 
 // GenerateEraProposalsAsync 起 goroutine 生成候选并流式吐事件。
 //
@@ -873,11 +875,12 @@ func (h *Host) GenerateEraProposalsAsync(ctx context.Context, era string) (<-cha
 	if err := h.acquireExclusive("生成时代术语候选"); err != nil {
 		return nil, err
 	}
-	// 独占取消：Ctrl+C / 关闭时能真的停掉这次 LLM 调用，而不是等它烧完。
-	inner, cancel := context.WithCancel(ctx)
+	// 独占取消：Ctrl+C / 关闭时登记取消入口，避免另一个独占作业插进来。
+	cancel := func() {}
 	h.mu.Lock()
 	h.exclusiveCancel = cancel
 	h.mu.Unlock()
+	_ = ctx
 
 	ch := make(chan EraProposalEvent, 8)
 	emit := func(stage EraStage, msg string, err error) {
@@ -894,45 +897,57 @@ func (h *Host) GenerateEraProposalsAsync(ctx context.Context, era string) (<-cha
 			close(ch)
 		}()
 
-		emit(EraStageStart, "正在请求模型生成「"+era+"」的时代称谓候选", nil)
-		emit(EraStageLLM, "模型思考中（这一阶段通常最慢，几十秒到数分钟）", nil)
+		// 终态只发一次，且由「看门狗」与「实际调用」竞争决定谁先到。
+		err := runWatchdoged(eraProposeTimeout, func(ctx context.Context) error {
+			emit(EraStageStart, "正在请求模型生成「"+era+"」的时代称谓候选", nil)
+			emit(EraStageLLM, "模型思考中（这一阶段通常最慢，几十秒到数分钟）", nil)
 
-		ctxT, cancelT := context.WithTimeout(inner, eraProposeTimeout)
-		defer cancelT()
-
-		doc, err := h.generateEraProposals(ctxT, era)
+			doc, err := h.generateEraProposalsRetry(ctx, era, func(ev llmretry.Event) {
+				emit(EraStageRetry, fmt.Sprintf("第 %d 次重试（等待 %s 后）：%s",
+					ev.Attempt, ev.Delay.Round(time.Second), ev.Err), nil)
+			})
+			if err != nil {
+				return err
+			}
+			if len(doc.Proposals) == 0 {
+				return errNoProposals
+			}
+			low := 0
+			for _, p := range doc.Proposals {
+				if p.Confidence == "low" {
+					low++
+				}
+			}
+			emit(EraStageDone, fmt.Sprintf(
+				"已生成 %d 条候选（其中 %d 条模型自报 low 把握）。\n"+
+					"候选尚未生效，需逐条审阅：\n"+
+					"  /rules proposals     查看（low 把握排在最前）\n"+
+					"  /rules adopt <词>    采纳为生效规则\n"+
+					"  /rules reject <词>   否决\n"+
+					"这些是模型依据「%s」生成的、未经核实；采纳后命中会被强制改写正文，务必自己过一遍。",
+				len(doc.Proposals), low, doc.Era), nil)
+			return nil
+		})
 		if err != nil {
-			if errors.Is(err, context.DeadlineExceeded) {
-				err = fmt.Errorf("候选生成超过 %s 未完成，已取消；可重试或换一个更明确的朝代名称", eraProposeTimeout)
-			}
 			emit(EraStageError, "生成失败", err)
-			return
 		}
-		if len(doc.Proposals) == 0 {
-			emit(EraStageError, "模型未给出任何候选", nil)
-			return
-		}
-		low := 0
-		for _, p := range doc.Proposals {
-			if p.Confidence == "low" {
-				low++
-			}
-		}
-		emit(EraStageDone, fmt.Sprintf(
-			"已生成 %d 条候选（其中 %d 条模型自报 low 把握）。\n"+
-				"候选尚未生效，需逐条审阅：\n"+
-				"  /rules proposals     查看（low 把握排在最前）\n"+
-				"  /rules adopt <词>    采纳为生效规则\n"+
-				"  /rules reject <词>   否决\n"+
-				"这些是模型依据「%s」生成的、未经核实；采纳后命中会被强制改写正文，务必自己过一遍。",
-			len(doc.Proposals), low, doc.Era), nil)
 	}()
 
 	return ch, nil
 }
 
 func (h *Host) generateEraProposals(ctx context.Context, era string) (*storepkg.EraProposalDoc, error) {
-	doc, err := userrules.NewEraGenerator(h.models.Default).Generate(ctx, era)
+	return h.generateEraProposalsRetry(ctx, era, nil)
+}
+
+func (h *Host) generateEraProposalsRetry(ctx context.Context, era string, onRetry func(llmretry.Event)) (*storepkg.EraProposalDoc, error) {
+	gen := userrules.NewEraGenerator(h.models.Default)
+	if onRetry != nil {
+		gen = gen.WithRetryReporter(func(attempt int, delay time.Duration, err error) {
+			onRetry(llmretry.Event{Attempt: attempt, Delay: delay, Err: err})
+		})
+	}
+	doc, err := gen.Generate(ctx, era)
 	if err != nil {
 		return nil, err
 	}
