@@ -192,3 +192,84 @@ func TestStopReworkPassClearsAndReturnsSnapshot(t *testing.T) {
 		t.Fatal("无 pass 时 StopReworkPass 应报错")
 	}
 }
+
+// 游标推进必须外送播报。此前推进完全静默，100 章 pass 全程零进度提示，
+// 只能靠反复手敲 /rework status 才知道跑到哪。
+func TestReworkHookFiresOnEveryCursorAdvance(t *testing.T) {
+	s := reworkStore(t, 1, 2, 3, 4, 5)
+	var got []domain.ReworkProgress
+	s.Progress.SetReworkHook(func(p domain.ReworkProgress) { got = append(got, p) })
+
+	if _, err := s.Progress.StartReworkPass(1, 3, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("开启 pass 不应触发推进播报，实际 %d 条", len(got))
+	}
+
+	if _, err := s.Progress.ApplyReviewOutcome(domain.FlowWriting, nil, "通过", 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Progress.ApplyReviewOutcome(domain.FlowRewriting, []int{2}, "需返工", 2); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Progress.ApplyReviewOutcome(domain.FlowWriting, nil, "通过", 3); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(got) != 3 {
+		t.Fatalf("每章一条播报，实际 %d 条: %+v", len(got), got)
+	}
+	if got[0].Reviewed != 1 || got[0].Rewrote || got[0].Done {
+		t.Errorf("第 1 章应是通过且未收尾: %+v", got[0])
+	}
+	if got[1].Reviewed != 2 || !got[1].Rewrote || got[1].Done {
+		t.Errorf("第 2 章应是判返工且未收尾: %+v", got[1])
+	}
+	if !got[2].Done {
+		t.Error("最后一章推进后应标记收尾")
+	}
+	if p := got[2].Pass; p.Reviewed != 3 || p.Skipped != 2 || len(p.Rewritten) != 1 {
+		t.Errorf("收尾快照统计不对: %+v", p)
+	}
+}
+
+// 快照必须与 store 解耦：UI 持有期间 store 还会继续追加 Rewritten。
+func TestReworkHookSnapshotIsIndependent(t *testing.T) {
+	s := reworkStore(t, 1, 2, 3)
+	var snap *domain.ReworkPass
+	s.Progress.SetReworkHook(func(p domain.ReworkProgress) {
+		if snap == nil {
+			cp := *p.Pass
+			snap = &cp
+		}
+	})
+	if _, err := s.Progress.StartReworkPass(1, 3, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Progress.ApplyReviewOutcome(domain.FlowWriting, nil, "通过", 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Progress.ApplyReviewOutcome(domain.FlowRewriting, []int{2}, "返工", 2); err != nil {
+		t.Fatal(err)
+	}
+	if snap == nil {
+		t.Fatal("未收到播报")
+	}
+	if snap.Reviewed != 1 || len(snap.Rewritten) != 0 {
+		t.Fatalf("首条快照应停在第 1 章: %+v", snap)
+	}
+}
+
+// pass 外的常规评审不得触发播报，否则正常写作会一直刷「返工进度」。
+func TestReworkHookSilentOutsidePass(t *testing.T) {
+	s := reworkStore(t, 1, 2, 3)
+	n := 0
+	s.Progress.SetReworkHook(func(domain.ReworkProgress) { n++ })
+	if _, err := s.Progress.ApplyReviewOutcome(domain.FlowWriting, nil, "常规评审", 2); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("无 pass 时不应播报，实际 %d 条", n)
+	}
+}

@@ -11,7 +11,12 @@ import (
 )
 
 // ProgressStore 管理创作进度状态。
-type ProgressStore struct{ io *IO }
+type ProgressStore struct {
+	io *IO
+	// reworkHook 只在 StartReworkPass/ApplyReviewOutcome 的锁外调用，读写无需额外加锁：
+	// 挂载发生在 Host 构造期，早于任何返工 pass。
+	reworkHook ReworkHook
+}
 
 func NewProgressStore(io *IO) *ProgressStore { return &ProgressStore{io: io} }
 
@@ -362,8 +367,6 @@ func (s *ProgressStore) SetPendingRewrites(chapters []int, reason string) error 
 }
 
 // ApplyReviewOutcome 原子应用审阅产生的流程状态。审阅语义由上层决定；Store 只负责
-// 校验 Flow 迁移和返工章节，并保证 Flow、PendingRewrites、RewriteReason 不出现中间态。
-// ApplyReviewOutcome 原子应用审阅产生的流程状态。审阅语义由上层决定；Store 只负责
 // 落盘。reviewedChapter 是本次评审的章节号（非 arc/global 评审时传入，arc/global
 // 传 0）：逐章返工 pass 的游标在同一事务内推进。
 //
@@ -373,6 +376,7 @@ func (s *ProgressStore) SetPendingRewrites(chapters []int, reason string) error 
 // 正是评审后按需返工的常态，所以这条路径必须由游标兜住。
 func (s *ProgressStore) ApplyReviewOutcome(flow domain.FlowState, chapters []int, reason string, reviewedChapter int) (*domain.Progress, error) {
 	var latest *domain.Progress
+	var advanced *domain.ReworkProgress
 	err := s.io.WithWriteLock(func() error {
 		p, err := s.loadUnlocked()
 		if err != nil {
@@ -403,33 +407,52 @@ func (s *ProgressStore) ApplyReviewOutcome(flow domain.FlowState, chapters []int
 			}
 			p.Flow = flow
 		}
-		advanceReworkPass(p, reviewedChapter, marked)
+		advanced = advanceReworkPass(p, reviewedChapter, marked)
 		if err := s.saveUnlocked(p); err != nil {
 			return err
 		}
 		latest = p
 		return nil
 	})
+	// 钩子在写锁之外触发：回调要发事件、可能被 UI 读取，绝不能持有 progress 锁。
+	if advanced != nil && s.reworkHook != nil {
+		s.reworkHook(*advanced)
+	}
 	return latest, err
 }
+
+// ReworkHook 是逐章返工游标推进的播报回调，由 Host 挂载以把进度转成用户可见事件。
+type ReworkHook func(domain.ReworkProgress)
+
+// SetReworkHook 挂载游标推进回调。必须在 Host 构造后、开始返工前调用。
+func (s *ProgressStore) SetReworkHook(h ReworkHook) { s.reworkHook = h }
 
 // advanceReworkPass 在评审落盘的同一事务内推进逐章返工游标。
 // 只认"本次评审章 == 当前游标"这一种情况：常规弧/全局评审（非返工 pass 期间
 // 发生）传不进正数章号；pass 外的评审即使章号相同也不该推动别人的游标。
-func advanceReworkPass(p *domain.Progress, reviewedChapter int, marked bool) {
+func advanceReworkPass(p *domain.Progress, reviewedChapter int, marked bool) *domain.ReworkProgress {
 	if p.ReworkPass == nil || reviewedChapter <= 0 {
-		return
+		return nil
 	}
 	if p.ReworkPass.Cursor != reviewedChapter {
-		return
+		return nil
 	}
 	p.ReworkPass.Cursor++
 	p.ReworkPass.Reviewed++
 	if marked {
 		p.ReworkPass.Rewritten = append(p.ReworkPass.Rewritten, reviewedChapter)
-		return
+	} else {
+		p.ReworkPass.Skipped++
 	}
-	p.ReworkPass.Skipped++
+	// 快照要给宿主读，必须深拷贝 Rewritten：p 随后会被后续写入复用。
+	snap := *p.ReworkPass
+	snap.Rewritten = slices.Clone(p.ReworkPass.Rewritten)
+	return &domain.ReworkProgress{
+		Pass:     &snap,
+		Reviewed: reviewedChapter,
+		Rewrote:  marked,
+		Done:     snap.Done(),
+	}
 }
 
 // StartReworkPass 开启逐章返工 pass，范围 [start, end]。

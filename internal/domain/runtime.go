@@ -2,6 +2,8 @@ package domain
 
 import (
 	"fmt"
+	"slices"
+	"strconv"
 	"strings"
 )
 
@@ -105,6 +107,45 @@ func (r *ReworkPass) Total() int {
 // Done 返回本 pass 是否已跑完最后一章的评审。
 func (r *ReworkPass) Done() bool {
 	return r != nil && r.Cursor > r.EndChapter
+}
+
+// CompactChapterList 把章号列表压成 "1-3, 7, 12-14" 的紧凑形式，避免上百章刷屏。
+// 宿主（返工收尾事件）与 TUI（/rework status）都要用，故放在 domain 单一实现。
+func CompactChapterList(chapters []int) string {
+	if len(chapters) == 0 {
+		return ""
+	}
+	sorted := append([]int(nil), chapters...)
+	slices.Sort(sorted)
+	var parts []string
+	runStart, runEnd := sorted[0], sorted[0]
+	flush := func() {
+		if runStart == runEnd {
+			parts = append(parts, strconv.Itoa(runStart))
+		} else {
+			parts = append(parts, fmt.Sprintf("%d-%d", runStart, runEnd))
+		}
+	}
+	for _, n := range sorted[1:] {
+		if n == runEnd+1 {
+			runEnd = n
+			continue
+		}
+		flush()
+		runStart, runEnd = n, n
+	}
+	flush()
+	return strings.Join(parts, ", ")
+}
+
+// ReworkProgress 描述逐章返工游标的一次推进。游标在 store 层静默前进，
+// 若不外送播报，长 pass（上百章）在事件流里与普通写作无法区分——用户既看不出
+// 跑到第几章，也看不出是否卡住。
+type ReworkProgress struct {
+	Pass     *ReworkPass // 推进后的 pass 快照
+	Reviewed int         // 本次评审的章号
+	Rewrote  bool        // 该章是否被判返工（false = 评审通过）
+	Done     bool        // 本次推进后 pass 是否收尾
 }
 
 // IsResumable 判断是否可以从断点恢复。

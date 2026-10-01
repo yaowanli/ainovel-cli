@@ -2,6 +2,8 @@ package host
 
 import (
 	"time"
+
+	"github.com/voocel/ainovel-cli/internal/domain"
 )
 
 // Event 是 TUI 消费的结构化事件。
@@ -72,6 +74,7 @@ type UISnapshot struct {
 	AdvanceHoldReason    string
 	RecoveryLabel        string
 	IsRunning            bool
+	ReworkPass           *domain.ReworkPass // 非 nil 时左侧概览显示返工进度
 	Agents               []AgentSnapshot
 
 	// 累计用量（整个会话，跨所有 agent 与模型切换）

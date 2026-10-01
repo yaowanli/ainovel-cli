@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -226,6 +227,9 @@ func New(cfg bootstrap.Config, bundle assets.Bundle, options ...NewOption) (*Hos
 		lifecycle:       lifecycleIdle,
 	}
 	h.runCtx, h.runCancel = context.WithCancel(context.Background())
+	// 逐章返工游标在 store 层静默前进，不播报的话长 pass 在事件流里与普通写作
+	// 无法区分（实测 100 章 pass 全程零进度提示，只能反复手敲 /rework status）。
+	store.Progress.SetReworkHook(h.emitReworkProgress)
 	h.observer = newObserver(store, h.emitEvent, h.emitDelta, h.emitClear)
 	workers.SetEventObserver(func(meta subagent.RunMeta, ev agentcore.Event) {
 		h.observer.handleWorkerEvent(meta.Agent, ev)
@@ -1084,6 +1088,12 @@ func (h *Host) StartReworkPass(start, end int) (*domain.ReworkPass, error) {
 	if _, err := h.ReworkPlanFor(start, end); err != nil {
 		return nil, err
 	}
+	// 先校验再落盘：ensureEngineForRework 失败时若队列已写就又成了无消费者的
+	// 空中转，且此时 /rework 已被 Active() 挡住，作者只能重启。
+	resume, err := h.reworkEngineNeed()
+	if err != nil {
+		return nil, err
+	}
 	progress, err := h.store.Progress.StartReworkPass(start, end, time.Now())
 	if err != nil {
 		return nil, err
@@ -1097,7 +1107,92 @@ func (h *Host) StartReworkPass(start, end int) (*domain.ReworkPass, error) {
 		Summary: fmt.Sprintf("已开启%s返工：第 %d-%d 章，共 %d 章。每章先经 Editor 评审，确有问题才重写。",
 			verb, start, end, progress.ReworkPass.Total()),
 	})
+	if resume {
+		h.emitEvent(Event{Time: time.Now(), Category: "SYSTEM", Level: "warn",
+			Summary: "检测到创作未在运行：已自动启动引擎以执行返工。" +
+				"（此前 /rework 只排队不启动引擎，会一直空转到重启为止）"})
+		if err := h.launchReworkEngine(); err != nil {
+			// 队列已在盘上，如实告知作者如何脱离，而不是让它无声空转。
+			h.emitEvent(Event{Time: time.Now(), Category: "ERROR", Level: "error",
+				Summary: "返工队列已建立但引擎启动失败：" + err.Error() +
+					"。请用 /resume 重试，或 /rework stop 撤销本次返工。"})
+			return nil, err
+		}
+	}
 	return progress.ReworkPass, nil
+}
+
+// reworkEngineNeed 报告开返工前需要什么引擎状态，并挡住无法执行的场景。
+// 返回 resume=true 表示当前是暂停态，需要（且允许）自动恢复。
+func (h *Host) reworkEngineNeed() (resume bool, err error) {
+	h.mu.Lock()
+	state, cocreating, ex := h.lifecycle, h.cocreating, h.exclusive
+	h.mu.Unlock()
+
+	if cocreating {
+		return false, fmt.Errorf("阶段共创进行中，无法开始返工；请先结束共创再 /rework")
+	}
+	if ex != "" {
+		return false, fmt.Errorf("%s进行中，无法开始返工；请先完成后再 /rework", ex)
+	}
+	switch state {
+	case lifecycleRunning:
+		return false, nil
+	case lifecycleCompleted:
+		return false, fmt.Errorf("本书已完结，/rework 无处可返；请先 /reopen 重开")
+	default:
+		// paused 与 idle 都要拉起引擎：两者都没有消费者。idle 是「本次会话尚未
+		// Resume」（如启动后直接开返工），同样会静默空转。
+		return true, nil
+	}
+}
+
+// launchReworkEngine 拉起引擎消费返工队列。
+func (h *Host) launchReworkEngine() error {
+	if err := h.budget.Refuse(); err != nil {
+		return err
+	}
+	h.refreshWriterRestore()
+	if !h.startEngine(nil) {
+		return fmt.Errorf("Engine 仍在完成上一轮停止，请稍后重试")
+	}
+	return nil
+}
+
+// emitReworkProgress 把游标推进转成用户可见事件。每章一条，让长 pass 自带累计视图。
+func (h *Host) emitReworkProgress(p domain.ReworkProgress) {
+	if p.Pass == nil {
+		return
+	}
+	verdict := "评审通过，未返工"
+	if p.Rewrote {
+		verdict = "已判返工"
+	}
+	if p.Done {
+		// 与 advance_gate 的「返工队列已排空」区分开：那条是 AdvanceHold 的一次性
+		// 暂停信号（可能永不触发），这条是 pass 真正跑完的收尾总结。
+		h.emitEvent(Event{
+			Time: time.Now(), Category: "SYSTEM", Level: "info",
+			Summary: fmt.Sprintf("逐章返工完成：第 %d-%d 章共 %d 章，已评审 %d，已返工 %d，评审通过 %d。%s",
+				p.Pass.StartChapter, p.Pass.EndChapter, p.Pass.Total(),
+				p.Pass.Reviewed, len(p.Pass.Rewritten), p.Pass.Skipped,
+				reworkRewrittenHint(p.Pass)),
+		})
+		return
+	}
+	h.emitEvent(Event{
+		Time: time.Now(), Category: "SYSTEM", Level: "info",
+		Summary: fmt.Sprintf("返工进度 %d/%d · 第 %d 章%s · 已评审 %d，已返工 %d，通过 %d",
+			p.Pass.Reviewed, p.Pass.Total(), p.Reviewed, verdict,
+			p.Pass.Reviewed, len(p.Pass.Rewritten), p.Pass.Skipped),
+	})
+}
+
+func reworkRewrittenHint(pass *domain.ReworkPass) string {
+	if len(pass.Rewritten) == 0 {
+		return "本次未发现需返工的章节。"
+	}
+	return "实际返工章：" + domain.CompactChapterList(pass.Rewritten) + "。"
 }
 
 // StopReworkPass 中止当前 pass。已进返工队列的章不受影响，仍会跑完。
@@ -1527,6 +1622,13 @@ func (h *Host) Snapshot() UISnapshot {
 		snap.InProgressChapter = progress.InProgressChapter
 		snap.PendingRewrites = progress.PendingRewrites
 		snap.RewriteReason = progress.RewriteReason
+		// 返工 pass 只在有记录时暴露给面板：快照会被 tickSnapshot 高频拉取，
+		// 这里给一份拷贝避免 UI 与 store 共享可变切片。
+		if pass := progress.ReworkPass; pass != nil {
+			cp := *pass
+			cp.Rewritten = slices.Clone(pass.Rewritten)
+			snap.ReworkPass = &cp
+		}
 		snap.Layered = progress.Layered
 		if progress.CurrentVolume > 0 {
 			snap.CurrentVolumeArc = fmt.Sprintf("第%d卷·第%d弧", progress.CurrentVolume, progress.CurrentArc)

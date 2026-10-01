@@ -163,6 +163,22 @@ func commandRegistryInstance() commandRegistry {
 			},
 		},
 		{
+			Name:        "resume",
+			Group:       "writing",
+			Usage:       "/resume",
+			Description: "恢复已暂停的创作（Esc 暂停后不必重启应用）",
+			AutoExecute: true,
+			NeedsIdle:   true,
+			Run: func(m Model, args []string) (tea.Model, tea.Cmd) {
+				if len(args) != 0 {
+					m.applyEvent(host.Event{Time: time.Now(), Category: "ERROR", Summary: "用法：/resume", Level: "error"})
+					m.refreshEventViewport()
+					return m, nil
+				}
+				return m, resumeBook(m.runtime)
+			},
+		},
+		{
 			Name:        "next",
 			Group:       "writing",
 			Usage:       "/next",

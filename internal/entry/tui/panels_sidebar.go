@@ -52,6 +52,11 @@ func renderStateContent(snap host.UISnapshot, contentW int) string {
 		}
 	}
 	overview.WriteString(renderField("字数", formatNumber(snap.TotalWordCount)))
+	// 返工中就把进度抬到概览区：此前只有 /rework status 能看到，pass 卡住或空转时
+	// 用户只能反复手敲才看得出「游标没动」。
+	if pass := snap.ReworkPass; pass != nil {
+		overview.WriteString(renderField("返工", reworkProgressLabel(pass)))
+	}
 	if label, ch := inProgressDisplay(snap); label != "" {
 		overview.WriteString(renderField(label, fmt.Sprintf("第 %d 章", ch)))
 	}

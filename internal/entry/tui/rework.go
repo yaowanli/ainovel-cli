@@ -17,6 +17,8 @@ const reworkUsage = `用法：
   /rework stop              中止当前返工（已入队的章仍会改完）
   /rework help              显示本帮助
 
+开启返工会自动恢复暂停中的创作；进度会逐章播报，概览区也常驻「返工 n/N」。
+
 每章先由 Editor 按当前 anti_ai_tone 与 style_skills 判据评审，确有问题才重写；
 评审通过的章直接跳过。返工期间后续已定稿章节会作为约束注入，不会被改坏。`
 
@@ -68,37 +70,8 @@ func formatReworkStatus(pass *domain.ReworkPass) string {
 	return strings.TrimRight(b.String(), "\n")
 }
 
-// formatChapterList 把章号列表压成 "1-3, 7, 12-14" 的紧凑形式，避免 112 章刷屏。
-func formatChapterList(chapters []int) string {
-	if len(chapters) == 0 {
-		return ""
-	}
-	sorted := append([]int(nil), chapters...)
-	for i := 1; i < len(sorted); i++ {
-		for j := i; j > 0 && sorted[j] < sorted[j-1]; j-- {
-			sorted[j], sorted[j-1] = sorted[j-1], sorted[j]
-		}
-	}
-	var parts []string
-	runStart, runEnd := sorted[0], sorted[0]
-	flush := func() {
-		if runStart == runEnd {
-			parts = append(parts, strconv.Itoa(runStart))
-		} else {
-			parts = append(parts, fmt.Sprintf("%d-%d", runStart, runEnd))
-		}
-	}
-	for _, n := range sorted[1:] {
-		if n == runEnd+1 {
-			runEnd = n
-			continue
-		}
-		flush()
-		runStart, runEnd = n, n
-	}
-	flush()
-	return strings.Join(parts, ", ")
-}
+// formatChapterList 复用 domain 的单一实现，避免宿主事件与面板各压一份。
+func formatChapterList(chapters []int) string { return domain.CompactChapterList(chapters) }
 
 // runRework 实现 /rework 的分发。返回是否已消费本次命令。
 func runRework(m Model, args []string) (Model, bool) {
@@ -190,4 +163,19 @@ func reworkEstimateRewrites(total int) int {
 		n = 1
 	}
 	return n
+}
+
+// reworkProgressLabel 渲染概览区的一行返工进度。已完成的 pass 也显示，
+// 否则作者刚跑完会以为进度凭空消失。
+func reworkProgressLabel(pass *domain.ReworkPass) string {
+	state := "进行中"
+	if pass.Done() {
+		state = "已完成"
+	}
+	label := fmt.Sprintf("%s %d/%d · 返工 %d 通过 %d",
+		state, pass.Reviewed, pass.Total(), len(pass.Rewritten), pass.Skipped)
+	if pass.Active() && pass.Reviewed == 0 {
+		label += " · 未开始"
+	}
+	return label
 }
